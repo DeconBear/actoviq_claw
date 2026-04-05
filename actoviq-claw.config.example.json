@@ -1,0 +1,28 @@
+{
+  "workspacePath": ".",
+  "runtimeConfigPath": "./actoviq-claw.runtime.settings.local.json",
+  "stateDir": "./.actoviq-claw",
+  "heartbeat": {
+    "enabled": true,
+    "intervalMinutes": 20,
+    "ackMaxChars": 240,
+    "useIsolatedSession": false,
+    "prompt": "Read HEARTBEAT.md if it exists in the current workspace. Follow it strictly. Do not revive stale work. If nothing needs attention, reply HEARTBEAT_OK.",
+    "activeHours": {
+      "start": "08:00",
+      "end": "23:30"
+    }
+  },
+  "autonomy": {
+    "autoRun": true,
+    "autoExtractMemory": true,
+    "autoDream": true,
+    "permissionMode": "bypassPermissions"
+  },
+  "buddy": {
+    "autoHatch": true,
+    "muted": false,
+    "name": "Mochi",
+    "personality": "quietly observant, warm, and encouraging"
+  }
+}

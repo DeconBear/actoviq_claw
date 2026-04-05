@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.actoviq-claw/
+actoviq-claw.config.json
+actoviq-claw.runtime.settings.local.json
+test/**/*.js
+tmp-openclaw/

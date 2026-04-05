@@ -1,0 +1,28 @@
+{
+  "name": "actoviq-claw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A full-screen autonomous TUI assistant built on the local actoviq-agent-sdk.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "actoviq-agent-sdk": "file:../actoviq-agent-sdk",
+    "blessed": "^0.1.81"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.8.3",
+    "vitest": "^4.0.8"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "env": {
+    "ACTOVIQ_BASE_URL": "https://your-model-endpoint.example.com/v1",
+    "ACTOVIQ_AUTH_TOKEN": "your-token",
+    "ACTOVIQ_MODEL": "your-model-name"
+  }
+}
