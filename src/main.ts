@@ -18,7 +18,7 @@ async function main(): Promise<void> {
   const controller = new AutonomousAssistantController(rootDir);
   await controller.initialize();
   const tui = new ActoviqClawTui(controller);
-  tui.mount();
+  await tui.mount();
 }
 
 main().catch(error => {

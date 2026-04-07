@@ -3,6 +3,7 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
     "outDir": "dist",
     "rootDir": "src",
     "strict": true,
@@ -12,10 +13,12 @@
     "resolveJsonModule": true,
     "declaration": false,
     "types": [
-      "node"
+      "node",
+      "react"
     ]
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ]
 }

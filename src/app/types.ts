@@ -105,6 +105,12 @@ export interface ControllerSnapshot {
   runtimeConfigPath: string;
   runtimeConfigSource: RuntimeBootstrapInfo['source'];
   detectedModel?: string;
+  permissionMode: ActoviqPermissionMode;
+  autoRunEnabled: boolean;
+  autoExtractMemoryEnabled: boolean;
+  autoDreamEnabled: boolean;
+  heartbeatEnabled: boolean;
+  heartbeatIntervalMinutes: number;
   paused: boolean;
   busy: boolean;
   liveOutput: string;
