@@ -1,11 +1,15 @@
 import path from 'node:path';
 
-import type { ActoviqAgentDefinition } from 'actoviq-agent-sdk';
+import {
+  createActoviqFileTools,
+  type ActoviqAgentDefinition,
+  type AgentToolDefinition,
+} from 'actoviq-agent-sdk';
 
 import type { AssistantAppConfig } from './types.js';
 
 export const DEFAULT_HEARTBEAT_PROMPT =
-  'Read HEARTBEAT.md if it exists in the current workspace. Follow it strictly. Do not revive stale work. If nothing needs attention, reply HEARTBEAT_OK.';
+  'Read HEARTBEAT.md if it exists in the current workspace by using the available file tools. Follow it strictly. Do not revive stale work. If nothing needs attention, reply HEARTBEAT_OK.';
 
 export const DEFAULT_HEARTBEAT_TEMPLATE = `# Heartbeat Checklist
 
@@ -19,10 +23,17 @@ export const DEFAULT_SYSTEM_PROMPT = `You are Actoviq Claw, a fully autonomous t
 
 Finish the user's task end to end whenever it is feasible. Prefer doing the work over proposing.
 Use tools aggressively but responsibly. Keep progress visible in short status updates when you are mid-task.
+You can inspect and modify the workspace directly with file tools such as Read, Glob, Grep, Edit, and Write.
 When a subproblem is focused and benefits from specialization, delegate with the Task tool to one of the named agents: planner, researcher, implementer, reviewer.
 Treat durable memory as future-facing context. Preserve stable facts and collaboration preferences. Use session memory to stay oriented during long tasks.
 Heartbeat turns are operational check-ins. Follow HEARTBEAT.md if it exists. If nothing needs attention, respond with HEARTBEAT_OK.
 If a buddy companion appears in context, do not impersonate it; simply coexist with it as a separate companion voice.`;
+
+export function buildDefaultTools(workspacePath: string): AgentToolDefinition[] {
+  return createActoviqFileTools({
+    cwd: workspacePath,
+  });
+}
 
 export function buildDefaultConfig(rootDir: string): AssistantAppConfig {
   return {
@@ -31,6 +42,7 @@ export function buildDefaultConfig(rootDir: string): AssistantAppConfig {
     stateDir: path.join(rootDir, '.actoviq-claw'),
     heartbeat: {
       enabled: true,
+      guideFilePath: path.join(rootDir, 'HEARTBEAT.md'),
       intervalMinutes: 20,
       ackMaxChars: 240,
       useIsolatedSession: false,

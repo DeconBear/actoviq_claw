@@ -1,17 +1,18 @@
+import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
 import {
-  createAgentSdk,
   type ActoviqAgentClient,
   type ActoviqBackgroundTaskRecord,
   type ActoviqBuddyState,
   type ActoviqDreamState,
   type AgentEvent,
   type AgentSession,
+  createAgentSdk,
 } from 'actoviq-agent-sdk';
 
-import { buildNamedAgents, DEFAULT_SYSTEM_PROMPT } from './defaults.js';
-import { parseCommand } from './commandParser.js';
+import { buildDefaultTools, buildNamedAgents, DEFAULT_SYSTEM_PROMPT } from './defaults.js';
+import { parseCommand, tokenizeCommand } from './commandParser.js';
 import {
   computeNextHeartbeatAt,
   isWithinActiveHours,
@@ -23,10 +24,13 @@ import {
   ensureRuntimeConfig,
   loadOrCreateAppConfig,
   loadOrCreateState,
+  saveAppConfig,
   saveState,
 } from './persistence.js';
 import type {
   AssistantAppConfig,
+  AssistantArchivedChat,
+  AssistantChatSummary,
   AssistantLogEntry,
   AssistantMission,
   AssistantPersistedState,
@@ -43,6 +47,16 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function isValidClockValue(value: string): boolean {
+  const match = value.match(/^(\d{2}):(\d{2})$/u);
+  if (!match) {
+    return false;
+  }
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59;
+}
+
 function trimPreview(value: string, maxLength = 180): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
   return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 1)}…`;
@@ -51,6 +65,34 @@ function trimPreview(value: string, maxLength = 180): string {
 function titleFromPrompt(prompt: string): string {
   const firstLine = prompt.trim().split(/\r?\n/u)[0] ?? 'Untitled mission';
   return trimPreview(firstLine, 72) || 'Untitled mission';
+}
+
+function titleFromChat(chat: Pick<AssistantArchivedChat, 'title' | 'missions' | 'logs' | 'createdAt'>): string {
+  if (chat.title.trim()) {
+    return chat.title;
+  }
+  const firstMission = [...chat.missions].sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+  if (firstMission?.title?.trim()) {
+    return firstMission.title;
+  }
+  const createdAt = new Date(chat.createdAt);
+  if (!Number.isNaN(createdAt.getTime())) {
+    return `Chat ${createdAt.toLocaleString()}`;
+  }
+  return 'Chat';
+}
+
+function chatPreview(chat: Pick<AssistantArchivedChat, 'missions' | 'logs'>): string {
+  const latestMission = [...chat.missions]
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+  if (latestMission?.resultText?.trim()) {
+    return trimPreview(latestMission.resultText, 72);
+  }
+  if (latestMission?.prompt?.trim()) {
+    return trimPreview(latestMission.prompt, 72);
+  }
+  const latestLog = [...chat.logs].sort((left, right) => right.at.localeCompare(left.at))[0];
+  return trimPreview(latestLog?.text ?? 'No messages yet.', 72);
 }
 
 function formatBackgroundTask(task: ActoviqBackgroundTaskRecord): string {
@@ -90,14 +132,17 @@ export class AutonomousAssistantController extends EventEmitter {
     this.config = await loadOrCreateAppConfig(this.rootDir);
     await ensureDirectory(this.config.stateDir);
     await ensureDirectory(`${this.config.stateDir}/sessions`);
-    await ensureHeartbeatTemplate(this.config.workspacePath);
+    await ensureHeartbeatTemplate(this.config.heartbeat.guideFilePath);
     this.runtimeInfo = await ensureRuntimeConfig(this.config.runtimeConfigPath);
     this.state = await loadOrCreateState(this.config.stateDir);
+    this.startFreshChatWindow();
+    await saveState(this.config.stateDir, this.state);
 
     this.sdk = await createAgentSdk({
       workDir: this.config.workspacePath,
       sessionDirectory: `${this.config.stateDir}/sessions`,
       systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      tools: buildDefaultTools(this.config.workspacePath),
       permissionMode: this.config.autonomy.permissionMode,
       agents: buildNamedAgents(),
     });
@@ -144,6 +189,154 @@ export class AutonomousAssistantController extends EventEmitter {
     }
   }
 
+  private summarizeChats(): AssistantChatSummary[] {
+    return this.state.chats.map(chat => ({
+      id: chat.id,
+      title: titleFromChat(chat),
+      createdAt: chat.createdAt,
+      updatedAt: chat.updatedAt,
+      archivedAt: chat.archivedAt,
+      missionCount: chat.missions.length,
+      preview: chatPreview(chat),
+    }));
+  }
+
+  private startFreshChatWindow(): void {
+    this.archiveCurrentChatIfNeeded();
+    this.state.currentChatId = createId('chat');
+    this.state.currentChatCreatedAt = nowIso();
+    this.state.currentChatTitle = `Chat ${new Date(this.state.currentChatCreatedAt).toLocaleString()}`;
+    this.state.currentChatRestoredFromId = undefined;
+    this.state.missions = [];
+    this.state.logs = [];
+    this.busy = false;
+    this.liveOutput = '';
+    this.activeMissionId = undefined;
+  }
+
+  private archiveCurrentChatIfNeeded(): void {
+    if (this.state.missions.length === 0 && this.state.logs.length === 0) {
+      return;
+    }
+
+    const latestMissionAt = this.state.missions.reduce(
+      (latest, mission) => (mission.updatedAt > latest ? mission.updatedAt : latest),
+      this.state.currentChatCreatedAt,
+    );
+    const latestLogAt = this.state.logs.reduce(
+      (latest, entry) => (entry.at > latest ? entry.at : latest),
+      latestMissionAt,
+    );
+
+    const chat: AssistantArchivedChat = {
+      id: this.state.currentChatId,
+      title: this.state.currentChatTitle,
+      createdAt: this.state.currentChatCreatedAt,
+      updatedAt: latestLogAt,
+      archivedAt: nowIso(),
+      missions: this.state.missions.map(mission => ({ ...mission })),
+      logs: this.state.logs.map(entry => ({ ...entry })),
+    };
+
+    this.state.chats = [chat, ...this.state.chats.filter(existing => existing.id !== chat.id)].slice(0, 50);
+  }
+
+  private findArchivedChat(query: string | undefined): AssistantArchivedChat | undefined {
+    if (this.state.chats.length === 0) {
+      return undefined;
+    }
+    if (!query || !query.trim()) {
+      return this.state.chats[0];
+    }
+
+    const normalized = query.trim().toLowerCase();
+    return this.state.chats.find(chat => {
+      const title = titleFromChat(chat).toLowerCase();
+      return chat.id.toLowerCase() === normalized || title.includes(normalized);
+    });
+  }
+
+  private restoreArchivedChat(chat: AssistantArchivedChat): void {
+    this.archiveCurrentChatIfNeeded();
+    this.state.chats = this.state.chats.filter(entry => entry.id !== chat.id);
+    this.state.currentChatId = chat.id;
+    this.state.currentChatTitle = titleFromChat(chat);
+    this.state.currentChatCreatedAt = chat.createdAt;
+    this.state.currentChatRestoredFromId = chat.id;
+    this.state.missions = chat.missions.map(mission => {
+      if (mission.status === 'running') {
+        return {
+          ...mission,
+          status: 'queued',
+          startedAt: undefined,
+          completedAt: undefined,
+          updatedAt: nowIso(),
+          error: mission.error ?? 'Restored from a previous chat window.',
+        };
+      }
+      return { ...mission };
+    });
+    this.state.logs = chat.logs.map(entry => ({ ...entry }));
+    this.busy = false;
+    this.liveOutput = '';
+    this.activeMissionId = undefined;
+  }
+
+  private async handleResumeCommand(args: string[]): Promise<void> {
+    const subject = (args[0] ?? '').trim();
+
+    if (!subject || subject.toLowerCase() === 'last') {
+      const chat = this.findArchivedChat(undefined);
+      if (!chat) {
+        this.log('info', 'system', 'No archived chats are available to resume.');
+        return;
+      }
+      this.restoreArchivedChat(chat);
+      this.log('success', 'system', `Resumed chat ${chat.id}: ${titleFromChat(chat)}`);
+      this.scheduleSave();
+      if (this.config.autonomy.autoRun) {
+        void this.processQueue();
+      }
+      return;
+    }
+
+    if (subject.toLowerCase() === 'list') {
+      const chats = this.summarizeChats();
+      this.log(
+        'info',
+        'system',
+        chats.length === 0
+          ? 'No archived chats are available.'
+          : chats
+              .slice(0, 12)
+              .map(chat => `${chat.id} | ${chat.title} | ${chat.missionCount} missions | ${chat.preview}`)
+              .join('\n'),
+      );
+      return;
+    }
+
+    if (subject.toLowerCase() === 'queue') {
+      this.state.paused = false;
+      this.log('success', 'system', 'Autonomous queue resumed.');
+      this.scheduleSave();
+      void this.processQueue();
+      return;
+    }
+
+    const chat = this.findArchivedChat(subject);
+    if (!chat) {
+      this.log('warn', 'system', `No archived chat matched "${subject}". Use /resume list first.`);
+      return;
+    }
+
+    this.restoreArchivedChat(chat);
+    this.log('success', 'system', `Resumed chat ${chat.id}: ${titleFromChat(chat)}`);
+    this.scheduleSave();
+    if (this.config.autonomy.autoRun) {
+      void this.processQueue();
+    }
+  }
+
   snapshot(): ControllerSnapshot {
     return {
       workspacePath: this.config.workspacePath,
@@ -155,7 +348,14 @@ export class AutonomousAssistantController extends EventEmitter {
       autoExtractMemoryEnabled: this.config.autonomy.autoExtractMemory,
       autoDreamEnabled: this.config.autonomy.autoDream,
       heartbeatEnabled: this.config.heartbeat.enabled,
+      heartbeatGuideFilePath: this.config.heartbeat.guideFilePath,
       heartbeatIntervalMinutes: this.config.heartbeat.intervalMinutes,
+      heartbeatUseIsolatedSession: this.config.heartbeat.useIsolatedSession,
+      heartbeatActiveHours: this.config.heartbeat.activeHours,
+      currentChatId: this.state.currentChatId,
+      currentChatTitle: this.state.currentChatTitle,
+      currentChatRestoredFromId: this.state.currentChatRestoredFromId,
+      archivedChats: this.summarizeChats(),
       paused: this.state.paused,
       busy: this.busy,
       liveOutput: this.liveOutput,
@@ -192,15 +392,9 @@ export class AutonomousAssistantController extends EventEmitter {
           [
             'Commands:',
             '/help',
-            '/pause | /resume',
-            '/heartbeat on | off | tick | every <minutes>',
-            '/buddy pet | mute | unmute | hatch <name> [personality]',
-            '/dream now | state',
-            '/memory state | find <query>',
-            '/tasks',
-            '/cancel <mission-id>',
-            '/sessions',
-            '/status',
+            '/status | /tasks | /heartbeat | /memory | /dream | /buddy',
+            '/resume [chat-id|last|list|queue] | /sessions | /close',
+            'Open a panel, then type local commands like "tick", "every 20", or "pet".',
           ].join('\n'),
         );
         break;
@@ -210,10 +404,7 @@ export class AutonomousAssistantController extends EventEmitter {
         this.scheduleSave();
         break;
       case 'resume':
-        this.state.paused = false;
-        this.log('success', 'system', 'Autonomous queue resumed.');
-        this.scheduleSave();
-        void this.processQueue();
+        await this.handleResumeCommand(command.args);
         break;
       case 'heartbeat':
         await this.handleHeartbeatCommand(command.args);
@@ -254,6 +445,8 @@ export class AutonomousAssistantController extends EventEmitter {
           'info',
           'system',
           [
+            `chat: ${this.state.currentChatTitle} (${this.state.currentChatId})`,
+            `archived chats: ${this.state.chats.length}`,
             `workspace: ${this.config.workspacePath}`,
             `model: ${this.runtimeInfo.detectedModel ?? 'unknown'}`,
             `paused: ${this.state.paused}`,
@@ -274,6 +467,10 @@ export class AutonomousAssistantController extends EventEmitter {
   }
 
   private enqueueMission(prompt: string): void {
+    if (this.state.missions.length === 0 && this.state.logs.length === 0) {
+      this.state.currentChatTitle = titleFromPrompt(prompt);
+    }
+
     const mission: AssistantMission = {
       id: createId('mission'),
       title: titleFromPrompt(prompt),
@@ -542,6 +739,259 @@ export class AutonomousAssistantController extends EventEmitter {
     this.emitUpdated();
   }
 
+  private async persistConfig(): Promise<void> {
+    await saveAppConfig(this.rootDir, this.config);
+  }
+
+  private heartbeatGuideInstruction(): string {
+    const relative = path.relative(this.config.workspacePath, this.config.heartbeat.guideFilePath);
+    const guidePath = relative && !relative.startsWith('..') ? relative.replace(/\\/g, '/') : this.config.heartbeat.guideFilePath;
+    return `If the heartbeat guide file exists at "${guidePath}", read it before acting and follow it strictly.`;
+  }
+
+  async updateHeartbeatSettings(patch: {
+    enabled?: boolean;
+    intervalMinutes?: number;
+    activeHours?: { start?: string; end?: string; timezone?: string | undefined };
+    guideFilePath?: string;
+    useIsolatedSession?: boolean;
+  }): Promise<void> {
+    if (typeof patch.enabled === 'boolean') {
+      this.config.heartbeat.enabled = patch.enabled;
+      if (patch.enabled) {
+        this.scheduleHeartbeat(true, 'manually-enabled');
+      }
+    }
+
+    if (typeof patch.intervalMinutes === 'number' && Number.isFinite(patch.intervalMinutes)) {
+      this.config.heartbeat.intervalMinutes = Math.max(1, Math.round(patch.intervalMinutes));
+      this.scheduleHeartbeat(true, 'interval-updated');
+    }
+
+    if (patch.activeHours) {
+      this.config.heartbeat.activeHours = {
+        start: patch.activeHours.start ?? this.config.heartbeat.activeHours?.start ?? '08:00',
+        end: patch.activeHours.end ?? this.config.heartbeat.activeHours?.end ?? '23:30',
+        timezone:
+          patch.activeHours.timezone === undefined
+            ? this.config.heartbeat.activeHours?.timezone
+            : patch.activeHours.timezone || undefined,
+      };
+      this.scheduleHeartbeat(true, 'active-hours-updated');
+    }
+
+    if (typeof patch.guideFilePath === 'string' && patch.guideFilePath.trim()) {
+      const nextGuidePath = path.isAbsolute(patch.guideFilePath)
+        ? patch.guideFilePath
+        : path.resolve(this.config.workspacePath, patch.guideFilePath);
+      this.config.heartbeat.guideFilePath = nextGuidePath;
+      await ensureHeartbeatTemplate(this.config.heartbeat.guideFilePath);
+    }
+
+    if (typeof patch.useIsolatedSession === 'boolean') {
+      this.config.heartbeat.useIsolatedSession = patch.useIsolatedSession;
+    }
+
+    await this.persistConfig();
+    this.emitUpdated();
+  }
+
+  async handlePanelInput(panel: 'help' | 'status' | 'tasks' | 'memory' | 'dream' | 'buddy' | 'heartbeat', input: string): Promise<void> {
+    const tokens = tokenizeCommand(input.trim());
+    const action = (tokens[0] ?? '').toLowerCase();
+    const args = tokens.slice(1);
+
+    if (!action) {
+      return;
+    }
+
+    switch (panel) {
+      case 'heartbeat': {
+        switch (action) {
+          case 'show':
+            this.log('info', 'heartbeat', 'Heartbeat settings refreshed.');
+            break;
+          case 'on':
+          case 'off':
+            await this.updateHeartbeatSettings({ enabled: action === 'on' });
+            this.log(action === 'on' ? 'success' : 'warn', 'heartbeat', `Heartbeat ${action === 'on' ? 'enabled' : 'disabled'}.`);
+            break;
+          case 'toggle':
+            await this.updateHeartbeatSettings({ enabled: !this.config.heartbeat.enabled });
+            this.log(
+              this.config.heartbeat.enabled ? 'success' : 'warn',
+              'heartbeat',
+              `Heartbeat ${this.config.heartbeat.enabled ? 'enabled' : 'disabled'}.`,
+            );
+            break;
+          case 'tick':
+          case 'run':
+            await this.runHeartbeat('manual');
+            break;
+          case 'every':
+          case 'interval': {
+            const minutes = Number(args[0]);
+            if (!Number.isFinite(minutes) || minutes <= 0) {
+              this.log('warn', 'heartbeat', 'Usage: every <minutes>');
+              break;
+            }
+            await this.updateHeartbeatSettings({ intervalMinutes: minutes });
+            this.log('success', 'heartbeat', `Heartbeat interval set to ${Math.round(minutes)} minutes.`);
+            break;
+          }
+          case 'start': {
+            const start = args[0] ?? '';
+            if (!isValidClockValue(start)) {
+              this.log('warn', 'heartbeat', 'Usage: start <HH:MM>');
+              break;
+            }
+            await this.updateHeartbeatSettings({ activeHours: { start } });
+            this.log('success', 'heartbeat', `Heartbeat start time set to ${start}.`);
+            break;
+          }
+          case 'end': {
+            const end = args[0] ?? '';
+            if (!isValidClockValue(end)) {
+              this.log('warn', 'heartbeat', 'Usage: end <HH:MM>');
+              break;
+            }
+            await this.updateHeartbeatSettings({ activeHours: { end } });
+            this.log('success', 'heartbeat', `Heartbeat end time set to ${end}.`);
+            break;
+          }
+          case 'hours': {
+            const start = args[0] ?? '';
+            const end = args[1] ?? '';
+            if (!isValidClockValue(start) || !isValidClockValue(end)) {
+              this.log('warn', 'heartbeat', 'Usage: hours <HH:MM> <HH:MM>');
+              break;
+            }
+            await this.updateHeartbeatSettings({ activeHours: { start, end } });
+            this.log('success', 'heartbeat', `Heartbeat active hours set to ${start}-${end}.`);
+            break;
+          }
+          case 'timezone': {
+            const timezone = args.join(' ').trim();
+            await this.updateHeartbeatSettings({ activeHours: { timezone: timezone.toLowerCase() === 'clear' ? '' : timezone } });
+            this.log('success', 'heartbeat', timezone ? `Heartbeat timezone set to ${timezone}.` : 'Heartbeat timezone cleared.');
+            break;
+          }
+          case 'file':
+          case 'path': {
+            const filePath = args.join(' ').trim();
+            if (!filePath) {
+              this.log('warn', 'heartbeat', 'Usage: file <path-to-heartbeat-guide>');
+              break;
+            }
+            await this.updateHeartbeatSettings({ guideFilePath: filePath });
+            this.log('success', 'heartbeat', `Heartbeat guide file set to ${this.config.heartbeat.guideFilePath}.`);
+            break;
+          }
+          case 'isolated': {
+            const mode = (args[0] ?? '').toLowerCase();
+            if (mode !== 'on' && mode !== 'off') {
+              this.log('warn', 'heartbeat', 'Usage: isolated <on|off>');
+              break;
+            }
+            await this.updateHeartbeatSettings({ useIsolatedSession: mode === 'on' });
+            this.log('success', 'heartbeat', `Heartbeat isolated session ${mode === 'on' ? 'enabled' : 'disabled'}.`);
+            break;
+          }
+          default:
+            this.log(
+              'warn',
+              'heartbeat',
+              'Heartbeat panel commands: on | off | toggle | tick | every <minutes> | start <HH:MM> | end <HH:MM> | hours <start> <end> | timezone <name|clear> | file <path> | isolated <on|off>',
+            );
+            break;
+        }
+        break;
+      }
+      case 'buddy': {
+        if (action === 'pet' || action === 'mute' || action === 'unmute' || action === 'hatch') {
+          await this.handleBuddyCommand([action, ...args]);
+          break;
+        }
+        this.log('warn', 'buddy', 'Buddy panel commands: pet | mute | unmute | hatch <name> [personality]');
+        break;
+      }
+      case 'dream': {
+        if (action === 'run' || action === 'now') {
+          await this.handleDreamCommand(['now']);
+          break;
+        }
+        if (action === 'state' || action === 'refresh') {
+          await this.handleDreamCommand(['state']);
+          break;
+        }
+        this.log('warn', 'dream', 'Dream panel commands: run | state');
+        break;
+      }
+      case 'memory': {
+        if (action === 'state' || action === 'refresh') {
+          await this.handleMemoryCommand(['state']);
+          break;
+        }
+        if (action === 'find') {
+          await this.handleMemoryCommand(['find', ...args]);
+          break;
+        }
+        this.log('warn', 'memory', 'Memory panel commands: refresh | find <query>');
+        break;
+      }
+      case 'tasks': {
+        if (action === 'pause') {
+          this.state.paused = true;
+          this.log('warn', 'system', 'Autonomous queue paused.');
+          this.scheduleSave();
+          break;
+        }
+        if (action === 'resume') {
+          await this.handleResumeCommand(args);
+          break;
+        }
+        if (action === 'cancel') {
+          await this.cancelMission(args[0]);
+          break;
+        }
+        this.log('warn', 'system', 'Tasks panel commands: pause | resume [chat-id|last|list|queue] | cancel <mission-id>');
+        break;
+      }
+      case 'status': {
+        if (action === 'pause') {
+          this.state.paused = true;
+          this.log('warn', 'system', 'Autonomous queue paused.');
+          this.scheduleSave();
+          break;
+        }
+        if (action === 'resume') {
+          this.state.paused = false;
+          this.log('success', 'system', 'Autonomous queue resumed.');
+          this.scheduleSave();
+          void this.processQueue();
+          break;
+        }
+        if (action === 'sessions') {
+          await this.handleSessionsCommand();
+          break;
+        }
+        if (action === 'newchat' || action === 'new') {
+          this.startFreshChatWindow();
+          this.log('success', 'system', `Opened ${this.state.currentChatTitle}.`);
+          this.scheduleSave();
+          break;
+        }
+        this.log('warn', 'system', 'Status panel commands: pause | resume | newchat | sessions');
+        break;
+      }
+      case 'help':
+        this.log('info', 'system', 'Use /heartbeat, /tasks, /memory, /dream, /buddy, or /status to open a focused panel.');
+        break;
+    }
+
+    this.emitUpdated();
+  }
+
   private scheduleHeartbeat(force: boolean, reason = 'scheduled'): void {
     const now = new Date();
     if (force || !this.state.heartbeats.nextTickAt) {
@@ -597,7 +1047,7 @@ export class AutonomousAssistantController extends EventEmitter {
     this.heartbeatBusy = true;
     try {
       const session = await this.resolveHeartbeatSession();
-      const result = await session.send(this.config.heartbeat.prompt, {
+      const result = await session.send(`${this.config.heartbeat.prompt}\n\n${this.heartbeatGuideInstruction()}`, {
         permissionMode: this.config.autonomy.permissionMode,
       });
       const normalized = normalizeHeartbeatResponse(
@@ -667,13 +1117,12 @@ export class AutonomousAssistantController extends EventEmitter {
       return;
     }
     if (action === 'on') {
-      this.config.heartbeat.enabled = true;
-      this.scheduleHeartbeat(true, 'manually-enabled');
+      await this.updateHeartbeatSettings({ enabled: true });
       this.log('success', 'heartbeat', 'Heartbeat enabled.');
       return;
     }
     if (action === 'off') {
-      this.config.heartbeat.enabled = false;
+      await this.updateHeartbeatSettings({ enabled: false });
       this.log('warn', 'heartbeat', 'Heartbeat disabled.');
       return;
     }
@@ -683,9 +1132,8 @@ export class AutonomousAssistantController extends EventEmitter {
         this.log('warn', 'heartbeat', 'Usage: /heartbeat every <minutes>');
         return;
       }
-      this.config.heartbeat.intervalMinutes = Math.max(1, Math.round(minutes));
-      this.scheduleHeartbeat(true, 'interval-updated');
-      this.log('success', 'heartbeat', `Heartbeat interval set to ${minutes} minutes.`);
+      await this.updateHeartbeatSettings({ intervalMinutes: minutes });
+      this.log('success', 'heartbeat', `Heartbeat interval set to ${Math.round(minutes)} minutes.`);
       return;
     }
     this.log('warn', 'heartbeat', 'Usage: /heartbeat on | off | tick | every <minutes>');
@@ -702,10 +1150,14 @@ export class AutonomousAssistantController extends EventEmitter {
       }
       case 'mute':
         this.buddy = await this.sdk.buddy.mute();
+        this.config.buddy.muted = true;
+        await this.persistConfig();
         this.log('info', 'buddy', 'Buddy muted.');
         break;
       case 'unmute':
         this.buddy = await this.sdk.buddy.unmute();
+        this.config.buddy.muted = false;
+        await this.persistConfig();
         this.log('success', 'buddy', 'Buddy unmuted.');
         break;
       case 'hatch': {
@@ -716,6 +1168,9 @@ export class AutonomousAssistantController extends EventEmitter {
           return;
         }
         await this.sdk.buddy.hatch({ name, personality });
+        this.config.buddy.name = name;
+        this.config.buddy.personality = personality;
+        await this.persistConfig();
         this.buddy = await this.sdk.buddy.state();
         this.log('success', 'buddy', `Buddy hatched: ${name}`);
         break;
@@ -863,9 +1318,6 @@ export class AutonomousAssistantController extends EventEmitter {
   }
 
   private async persistNow(): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
     await saveState(this.config.stateDir, this.state);
   }
 }

@@ -101,14 +101,17 @@ npm run dev -- --workspace E:/your/workspace
 
 ## 7. 快捷键
 
-- `/`：打开 slash command palette
-- `Up / Down`：选择 slash 候选，或浏览输入历史
-- `Tab`：补全当前 slash 命令
+- `/`：打开命令建议
+- `@`：补全工作区中的文件和路径
+- 建议列表会直接显示在输入区 footer，不会占满整个屏幕
+- `Up / Down`：在输入框非空时切换输入历史
+- `Tab`：接受当前建议，或把多个文件建议的公共前缀继续补全
+- `Ctrl+N / Ctrl+P`：在当前建议列表中切换
 - `Enter`：提交任务或执行命令
 - `Shift+Enter`：在输入框里换行
-- `Esc`：关闭面板；输入框非空时按两次可清空；空输入时可中断当前 mission
+- `Esc`：先收起当前建议；再按可关闭面板；输入框非空时按两次可清空；空输入时可中断当前 mission
 - `Left / Right`：面板打开时切换不同面板
-- `PageUp / PageDown`：滚动主聊天流
+- `鼠标滚轮 / PageUp / PageDown`：滚动主聊天流
 - `Ctrl+Q`：退出
 - `Ctrl+C`：退出
 - `?`：在空输入状态下打开帮助面板
@@ -130,6 +133,8 @@ npm run dev -- --workspace E:/your/workspace
 - `/help`
 - `/pause`
 - `/resume`
+- `/resume list`
+- `/resume queue`
 - `/status`
 - `/tasks`
 - `/sessions`
@@ -153,7 +158,7 @@ npm run dev -- --workspace E:/your/workspace
 其中：
 
 - `/help /status /tasks /memory /dream /buddy` 会打开对应面板
-- `/pause /resume /heartbeat ... /buddy ... /dream ... /memory find ...` 会执行动作
+- `/pause /resume /resume list /resume queue /heartbeat ... /buddy ... /dream ... /memory find ...` 会执行动作
 
 ## 9. 各个面板的作用
 

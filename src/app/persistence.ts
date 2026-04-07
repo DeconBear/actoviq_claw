@@ -10,6 +10,7 @@ import {
 import { buildDefaultConfig, DEFAULT_HEARTBEAT_TEMPLATE } from './defaults.js';
 import type {
   AssistantAppConfig,
+  AssistantArchivedChat,
   AssistantPersistedState,
   RuntimeBootstrapInfo,
 } from './types.js';
@@ -20,6 +21,136 @@ const HEARTBEAT_FILENAME = 'HEARTBEAT.md';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function createChatId(): string {
+  return `chat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function defaultChatTitle(createdAt: string): string {
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) {
+    return 'Chat';
+  }
+  return `Chat ${date.toLocaleString()}`;
+}
+
+function asArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function normalizeChats(value: unknown): AssistantArchivedChat[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(isRecord)
+    .map(chat => {
+      const createdAt = typeof chat.createdAt === 'string' ? chat.createdAt : nowIso();
+      const updatedAt = typeof chat.updatedAt === 'string' ? chat.updatedAt : createdAt;
+      const archivedAt = typeof chat.archivedAt === 'string' ? chat.archivedAt : updatedAt;
+      return {
+        id: typeof chat.id === 'string' && chat.id.trim() ? chat.id : createChatId(),
+        title:
+          typeof chat.title === 'string' && chat.title.trim()
+            ? chat.title
+            : defaultChatTitle(createdAt),
+        createdAt,
+        updatedAt,
+        archivedAt,
+        missions: asArray<AssistantArchivedChat['missions'][number]>(chat.missions),
+        logs: asArray<AssistantArchivedChat['logs'][number]>(chat.logs),
+      };
+    })
+    .sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
+}
+
+function normalizeState(raw: unknown): AssistantPersistedState {
+  const defaults = defaultPersistedState();
+  if (!isRecord(raw)) {
+    return defaults;
+  }
+
+  if (raw.version === 2) {
+    const currentChatCreatedAt =
+      typeof raw.currentChatCreatedAt === 'string' ? raw.currentChatCreatedAt : defaults.currentChatCreatedAt;
+    return {
+      version: 2,
+      paused: typeof raw.paused === 'boolean' ? raw.paused : defaults.paused,
+      controlSessionId:
+        typeof raw.controlSessionId === 'string' && raw.controlSessionId.trim()
+          ? raw.controlSessionId
+          : undefined,
+      currentChatId:
+        typeof raw.currentChatId === 'string' && raw.currentChatId.trim()
+          ? raw.currentChatId
+          : defaults.currentChatId,
+      currentChatTitle:
+        typeof raw.currentChatTitle === 'string' && raw.currentChatTitle.trim()
+          ? raw.currentChatTitle
+          : defaultChatTitle(currentChatCreatedAt),
+      currentChatCreatedAt,
+      currentChatRestoredFromId:
+        typeof raw.currentChatRestoredFromId === 'string' && raw.currentChatRestoredFromId.trim()
+          ? raw.currentChatRestoredFromId
+          : undefined,
+      chats: normalizeChats(raw.chats),
+      missions: asArray<AssistantPersistedState['missions'][number]>(raw.missions),
+      logs: asArray<AssistantPersistedState['logs'][number]>(raw.logs),
+      heartbeats: isRecord(raw.heartbeats)
+        ? {
+            lastTickAt: typeof raw.heartbeats.lastTickAt === 'string' ? raw.heartbeats.lastTickAt : undefined,
+            nextTickAt: typeof raw.heartbeats.nextTickAt === 'string' ? raw.heartbeats.nextTickAt : undefined,
+            lastReason: typeof raw.heartbeats.lastReason === 'string' ? raw.heartbeats.lastReason : undefined,
+            lastResult: typeof raw.heartbeats.lastResult === 'string' ? raw.heartbeats.lastResult : undefined,
+            skippedCount:
+              typeof raw.heartbeats.skippedCount === 'number'
+                ? raw.heartbeats.skippedCount
+                : defaults.heartbeats.skippedCount,
+          }
+        : defaults.heartbeats,
+    };
+  }
+
+  const missions = asArray<AssistantPersistedState['missions'][number]>(raw.missions);
+  const logs = asArray<AssistantPersistedState['logs'][number]>(raw.logs);
+  const firstTimestamp =
+    missions[0]?.createdAt ??
+    logs[0]?.at ??
+    defaults.currentChatCreatedAt;
+
+  return {
+    version: 2,
+    paused: typeof raw.paused === 'boolean' ? raw.paused : defaults.paused,
+    controlSessionId:
+      typeof raw.controlSessionId === 'string' && raw.controlSessionId.trim()
+        ? raw.controlSessionId
+        : undefined,
+    currentChatId: createChatId(),
+    currentChatTitle: defaultChatTitle(firstTimestamp),
+    currentChatCreatedAt: firstTimestamp,
+    currentChatRestoredFromId: undefined,
+    chats: [],
+    missions,
+    logs,
+    heartbeats: isRecord(raw.heartbeats)
+      ? {
+          lastTickAt: typeof raw.heartbeats.lastTickAt === 'string' ? raw.heartbeats.lastTickAt : undefined,
+          nextTickAt: typeof raw.heartbeats.nextTickAt === 'string' ? raw.heartbeats.nextTickAt : undefined,
+          lastReason: typeof raw.heartbeats.lastReason === 'string' ? raw.heartbeats.lastReason : undefined,
+          lastResult: typeof raw.heartbeats.lastResult === 'string' ? raw.heartbeats.lastResult : undefined,
+          skippedCount:
+            typeof raw.heartbeats.skippedCount === 'number'
+              ? raw.heartbeats.skippedCount
+              : defaults.heartbeats.skippedCount,
+        }
+      : defaults.heartbeats,
+  };
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -75,6 +206,15 @@ function mergeConfig(defaults: AssistantAppConfig, raw: unknown): AssistantAppCo
     heartbeat: {
       enabled:
         typeof heartbeat.enabled === 'boolean' ? heartbeat.enabled : defaults.heartbeat.enabled,
+      guideFilePath:
+        typeof heartbeat.guideFilePath === 'string' && heartbeat.guideFilePath.trim()
+          ? path.resolve(
+              typeof raw.workspacePath === 'string' && raw.workspacePath.trim()
+                ? path.resolve(raw.workspacePath)
+                : defaults.workspacePath,
+              heartbeat.guideFilePath,
+            )
+          : defaults.heartbeat.guideFilePath,
       intervalMinutes:
         typeof heartbeat.intervalMinutes === 'number'
           ? heartbeat.intervalMinutes
@@ -204,9 +344,13 @@ export async function loadOrCreateAppConfig(rootDir: string): Promise<AssistantA
   return merged;
 }
 
-export async function ensureHeartbeatTemplate(workspacePath: string): Promise<string> {
-  const heartbeatPath = path.join(workspacePath, HEARTBEAT_FILENAME);
+export async function saveAppConfig(rootDir: string, config: AssistantAppConfig): Promise<void> {
+  await writeJsonFile(path.join(rootDir, CONFIG_FILENAME), config);
+}
+
+export async function ensureHeartbeatTemplate(heartbeatPath: string): Promise<string> {
   if (!(await fileExists(heartbeatPath))) {
+    await ensureDirectory(path.dirname(heartbeatPath));
     await writeFile(heartbeatPath, DEFAULT_HEARTBEAT_TEMPLATE, 'utf8');
   }
   return heartbeatPath;
@@ -299,9 +443,14 @@ function detectModelFromLoadedConfig(): string | undefined {
 }
 
 export function defaultPersistedState(): AssistantPersistedState {
+  const createdAt = nowIso();
   return {
-    version: 1,
+    version: 2,
     paused: false,
+    currentChatId: createChatId(),
+    currentChatTitle: defaultChatTitle(createdAt),
+    currentChatCreatedAt: createdAt,
+    chats: [],
     missions: [],
     logs: [],
     heartbeats: {
@@ -312,9 +461,9 @@ export function defaultPersistedState(): AssistantPersistedState {
 
 export async function loadOrCreateState(stateDir: string): Promise<AssistantPersistedState> {
   const statePath = path.join(stateDir, STATE_FILENAME);
-  const loaded = await readJsonFile<AssistantPersistedState>(statePath);
-  const next = loaded ?? defaultPersistedState();
-  if (!loaded) {
+  const loaded = await readJsonFile<unknown>(statePath);
+  const next = normalizeState(loaded);
+  if (!loaded || JSON.stringify(loaded) !== JSON.stringify(next)) {
     await writeJsonFile(statePath, next);
   }
   return next;

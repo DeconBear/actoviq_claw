@@ -22,6 +22,7 @@ export interface AssistantAppConfig {
   stateDir: string;
   heartbeat: {
     enabled: boolean;
+    guideFilePath: string;
     intervalMinutes: number;
     ackMaxChars: number;
     useIsolatedSession: boolean;
@@ -78,10 +79,35 @@ export interface HeartbeatRuntimeState {
   skippedCount: number;
 }
 
+export interface AssistantArchivedChat {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string;
+  missions: AssistantMission[];
+  logs: AssistantLogEntry[];
+}
+
+export interface AssistantChatSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string;
+  missionCount: number;
+  preview: string;
+}
+
 export interface AssistantPersistedState {
-  version: 1;
+  version: 2;
   paused: boolean;
   controlSessionId?: string;
+  currentChatId: string;
+  currentChatTitle: string;
+  currentChatCreatedAt: string;
+  currentChatRestoredFromId?: string;
+  chats: AssistantArchivedChat[];
   missions: AssistantMission[];
   logs: AssistantLogEntry[];
   heartbeats: HeartbeatRuntimeState;
@@ -110,7 +136,14 @@ export interface ControllerSnapshot {
   autoExtractMemoryEnabled: boolean;
   autoDreamEnabled: boolean;
   heartbeatEnabled: boolean;
+  heartbeatGuideFilePath: string;
   heartbeatIntervalMinutes: number;
+  heartbeatUseIsolatedSession: boolean;
+  heartbeatActiveHours?: ActiveHoursWindow;
+  currentChatId: string;
+  currentChatTitle: string;
+  currentChatRestoredFromId?: string;
+  archivedChats: AssistantChatSummary[];
   paused: boolean;
   busy: boolean;
   liveOutput: string;
