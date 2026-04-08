@@ -44,6 +44,7 @@ Behavior:
 - the current shell directory becomes the working workspace
 - `actov --workspace <path>` overrides the workspace explicitly
 - state, chat history, and local config are then managed relative to that workspace unless changed in config
+
 ## 4. Runtime Configuration
 
 The runtime looks for:
@@ -521,10 +522,13 @@ Current limitations include:
 This repository includes a GitHub Actions workflow for npm publishing:
 
 - [npm-publish.yml](./.github/workflows/npm-publish.yml)
+- [ci.yml](./.github/workflows/ci.yml)
 
 To use it:
 
-1. add an `NPM_TOKEN` repository secret in GitHub
+1. choose one publish mode:
+   - add an `NPM_TOKEN` repository secret in GitHub
+   - or configure npm trusted publishing for this GitHub repository
 2. update the version in `package.json`
 3. create and push a matching Git tag such as `v0.1.0`
 
@@ -535,6 +539,8 @@ The workflow will:
 - run tests
 - build the package
 - publish to npm
+
+The separate `CI` workflow runs on normal pushes and pull requests so code health is checked even when you are not publishing.
 
 ## 25. Long-Term Direction
 

@@ -46,7 +46,12 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Publish to npm
+      - name: Publish to npm with token
+        if: ${{ secrets.NPM_TOKEN != '' }}
         run: npm publish --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to npm with trusted publishing
+        if: ${{ secrets.NPM_TOKEN == '' }}
+        run: npm publish --provenance

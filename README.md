@@ -206,6 +206,13 @@ The workflow will then:
 - build the package
 - publish it to npm
 
+This repository also includes a normal CI workflow at [.github/workflows/ci.yml](./.github/workflows/ci.yml) for push and pull request verification.
+
+Publishing supports two modes:
+
+- `NPM_TOKEN` secret with an npm automation token
+- npm trusted publishing via GitHub OIDC, if you configure the package on npm
+
 ## Long-Term Direction
 
 `Actoviq Claw` should be read as the first visible shell of a larger ambition:
