@@ -1,9 +1,26 @@
 {
   "name": "actoviq-claw",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
-  "description": "A full-screen autonomous TUI assistant built on the local actoviq-agent-sdk.",
+  "description": "A full-screen autonomous TUI assistant and early cloud-brain experiment built on actoviq-agent-sdk.",
+  "bin": {
+    "actov": "bin/actov.js"
+  },
+  "main": "dist/main.js",
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "USAGE.md",
+    "USAGE-zh.md",
+    "HEARTBEAT.md",
+    "actoviq-claw.config.example.json",
+    "actoviq-claw.runtime.settings.example.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=18"
   },

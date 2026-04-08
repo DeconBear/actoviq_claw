@@ -30,7 +30,21 @@ If you want to point the assistant at another workspace:
 npm run dev -- --workspace E:/your/workspace
 ```
 
-## 3. Runtime Configuration
+## 3. Global Install After NPM Publish
+
+Once the package is published to npm, users can install it globally and launch it from any terminal directory:
+
+```bash
+npm install -g actoviq-claw
+actov
+```
+
+Behavior:
+
+- the current shell directory becomes the working workspace
+- `actov --workspace <path>` overrides the workspace explicitly
+- state, chat history, and local config are then managed relative to that workspace unless changed in config
+## 4. Runtime Configuration
 
 The runtime looks for:
 
@@ -48,7 +62,7 @@ At minimum, set:
 
 Legacy field names are also accepted and mapped automatically, including older `ANTHROPIC_*` runtime fields.
 
-## 4. App Configuration
+## 5. App Configuration
 
 The assistant's own app config lives in:
 
@@ -69,7 +83,7 @@ Typical settings here include:
 - computer-use options
 - MCP server definitions
 
-## 5. Main Interface
+## 6. Main Interface
 
 The TUI is chat-first.
 
@@ -82,7 +96,7 @@ You mainly see:
 
 The main transcript is intentionally quieter than a debug console. It prioritizes user requests and assistant replies instead of dumping every internal runtime event into the center of the screen.
 
-## 6. Core Input Rules
+## 7. Core Input Rules
 
 - type plain text: submit a mission
 - type `/`: open the slash command entry list
@@ -95,7 +109,7 @@ The main transcript is intentionally quieter than a debug console. It prioritize
 - mouse wheel or `PageUp / PageDown`: scroll transcript or panel content
 - `Ctrl+Q` or `Ctrl+C`: exit
 
-## 7. Slash Entry Points
+## 8. Slash Entry Points
 
 The main slash entry points are:
 
@@ -111,7 +125,7 @@ The main slash entry points are:
 
 The slash list is intended as an entry layer. Most feature-specific actions happen after you enter a panel.
 
-## 8. How Panels Work
+## 9. How Panels Work
 
 After entering a panel:
 
@@ -127,7 +141,7 @@ Example:
 - press `Enter`
 - then choose `24h` or `hours 09:00 18:00`
 
-## 9. Status Panel
+## 10. Status Panel
 
 Open:
 
@@ -155,7 +169,7 @@ Common status-panel commands:
 - `history`
 - `history-dir <path>`
 
-## 10. Tasks Panel
+## 11. Tasks Panel
 
 Open:
 
@@ -192,7 +206,7 @@ Behavior:
 - each id is annotated with recent update time
 - the selected entry exposes full detail including workspace path, creation time, and last update time
 
-## 11. Heartbeat Panel
+## 12. Heartbeat Panel
 
 Open:
 
@@ -256,7 +270,7 @@ hours 09:00 22:30
 file ./HEARTBEAT.md
 ```
 
-## 12. Heartbeat Guide File
+## 13. Heartbeat Guide File
 
 The guide file tells heartbeat what to inspect.
 
@@ -272,7 +286,7 @@ file ./ops/HEARTBEAT.md
 
 The assistant is expected to read that guide during heartbeat turns and follow it strictly.
 
-## 13. Tools Panel
+## 14. Tools Panel
 
 Open:
 
@@ -325,7 +339,7 @@ Computer-use tools:
 
 If you configure MCP servers, their tools can also appear in this panel.
 
-## 14. Permission Panel
+## 15. Permission Panel
 
 Open:
 
@@ -347,7 +361,7 @@ Relationship between `/permission` and `/tools`:
 - `/tools` defines the concrete allowlist
 - the effective runtime capability is the intersection of both
 
-## 15. Buddy Panel
+## 16. Buddy Panel
 
 Open:
 
@@ -376,7 +390,7 @@ persona calm and observant
 pet
 ```
 
-## 16. Memory Panel
+## 17. Memory Panel
 
 Open:
 
@@ -397,7 +411,7 @@ Common actions:
 - `refresh`
 - `find <query>`
 
-## 17. Dream Panel
+## 18. Dream Panel
 
 Open:
 
@@ -421,7 +435,7 @@ Common actions:
 
 The system can also run dream automatically when conditions are satisfied.
 
-## 18. Skills
+## 19. Skills
 
 The current runtime loads built-in SDK skills even though the TUI does not yet expose a dedicated `/skills` panel.
 
@@ -438,7 +452,7 @@ Bundled skills currently include:
 
 These are runtime-level capabilities and can already be used internally by the SDK.
 
-## 19. Chat History
+## 20. Chat History
 
 Every launch starts a fresh chat window.
 
@@ -464,7 +478,7 @@ history
 history-dir ./my-history
 ```
 
-## 20. Recommended First-Time Workflow
+## 21. Recommended First-Time Workflow
 
 1. Run `npm run dev`
 2. Open `/status` and confirm workspace, model, and history path
@@ -473,7 +487,7 @@ history-dir ./my-history
 5. Submit a normal natural-language mission
 6. Use `/tasks -> resume` when you want to restore an older chat
 
-## 21. Troubleshooting
+## 22. Troubleshooting
 
 ### Why does every launch start a new chat?
 
@@ -491,7 +505,7 @@ Heartbeat can legitimately decide that nothing needs attention and acknowledge w
 
 Dream is stateful. It can be blocked by timing, locking, or session-related gates until a suitable run condition is met.
 
-## 22. Current Limitations
+## 23. Current Limitations
 
 This project is still early-stage.
 
@@ -502,7 +516,27 @@ Current limitations include:
 - cross-device and cloud-brain integration are still future goals
 - the interface is still being iterated heavily
 
-## 23. Long-Term Direction
+## 24. NPM Release Automation
+
+This repository includes a GitHub Actions workflow for npm publishing:
+
+- [npm-publish.yml](./.github/workflows/npm-publish.yml)
+
+To use it:
+
+1. add an `NPM_TOKEN` repository secret in GitHub
+2. update the version in `package.json`
+3. create and push a matching Git tag such as `v0.1.0`
+
+The workflow will:
+
+- install dependencies
+- run typecheck
+- run tests
+- build the package
+- publish to npm
+
+## 25. Long-Term Direction
 
 `Actoviq Claw` is meant to be more than a terminal app.
 

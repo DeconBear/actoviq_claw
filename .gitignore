@@ -6,3 +6,4 @@ actoviq-claw.runtime.settings.local.json
 test/**/*.js
 tmp-openclaw/
 actoviq_claw/
+AGENTS.md

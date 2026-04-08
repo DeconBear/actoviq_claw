@@ -60,6 +60,21 @@ If credentials are missing, configure either:
 
 Legacy runtime names are mapped automatically, so existing `ANTHROPIC_*` fields can still work.
 
+## Global CLI
+
+After the package is published, users can install it globally and launch the TUI from any directory:
+
+```bash
+npm install -g actoviq-claw
+actov
+```
+
+Behavior:
+
+- the current terminal directory becomes the working workspace
+- `actov --workspace <path>` can override that workspace explicitly
+- the TUI stores state and history relative to the chosen workspace unless you change the config
+
 ## Main Config Files
 
 - [actoviq-claw.runtime.settings.example.json](./actoviq-claw.runtime.settings.example.json)
@@ -172,6 +187,24 @@ What is still evolving:
 - English usage guide: [USAGE.md](./USAGE.md)
 - Chinese usage guide: [USAGE-zh.md](./USAGE-zh.md)
 - Heartbeat guide template: [HEARTBEAT.md](./HEARTBEAT.md)
+
+## NPM Release Automation
+
+This repository now includes a GitHub Actions workflow at [.github/workflows/npm-publish.yml](./.github/workflows/npm-publish.yml).
+
+To use it:
+
+1. add an `NPM_TOKEN` secret in the GitHub repository settings
+2. bump the package version in `package.json`
+3. create and push a matching tag such as `v0.1.0`
+
+The workflow will then:
+
+- install dependencies
+- run typecheck
+- run tests
+- build the package
+- publish it to npm
 
 ## Long-Term Direction
 
