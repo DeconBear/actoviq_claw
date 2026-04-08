@@ -4,6 +4,22 @@
   "private": false,
   "type": "module",
   "description": "A full-screen autonomous TUI assistant and early cloud-brain experiment built on actoviq-agent-sdk.",
+  "keywords": [
+    "actoviq",
+    "ai",
+    "assistant",
+    "autonomous",
+    "terminal",
+    "tui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DeconBear/actoviq_claw.git"
+  },
+  "homepage": "https://github.com/DeconBear/actoviq_claw#readme",
+  "bugs": {
+    "url": "https://github.com/DeconBear/actoviq_claw/issues"
+  },
   "bin": {
     "actov": "bin/actov.js"
   },
