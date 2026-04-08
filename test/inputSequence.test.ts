@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { Cursor } from '../src/app/claudecode/Cursor.js';
-import { applyRawInputSequence, withRawTerminalKeys } from '../src/app/inputSequence.js';
+import { applyRawInputSequence, parseRawMouseInput, parseRawMouseWheel, withRawTerminalKeys } from '../src/app/inputSequence.js';
 
 describe('applyRawInputSequence', () => {
   it('applies mixed printable characters and backspace in one raw chunk', () => {
@@ -81,5 +81,30 @@ describe('withRawTerminalKeys', () => {
 
     expect(wheelUp.wheelUp).toBe(true);
     expect(wheelDown.wheelDown).toBe(true);
+  });
+
+  it('clears arrow flags when a wheel event is detected from raw input', () => {
+    const wheelUp = withRawTerminalKeys({ upArrow: true }, '', '\u001b[<64;40;18M');
+    const wheelDown = withRawTerminalKeys({ downArrow: true }, '', '\u001b[<65;40;18M');
+
+    expect(wheelUp.wheelUp).toBe(true);
+    expect(wheelUp.upArrow).toBe(false);
+    expect(wheelDown.wheelDown).toBe(true);
+    expect(wheelDown.downArrow).toBe(false);
+  });
+});
+
+describe('parseRawMouseWheel', () => {
+  it('parses wheel direction from raw input', () => {
+    expect(parseRawMouseWheel('\u001b[<64;40;18M')).toEqual({ wheelUp: true });
+    expect(parseRawMouseWheel('\u001b[<65;40;18M')).toEqual({ wheelDown: true });
+  });
+});
+
+describe('parseRawMouseInput', () => {
+  it('parses SGR left-button press, drag, and release sequences', () => {
+    expect(parseRawMouseInput('\u001b[<0;12;8M')).toEqual({ leftDown: true, col: 11, row: 7 });
+    expect(parseRawMouseInput('\u001b[<32;14;9M')).toEqual({ leftDrag: true, col: 13, row: 8 });
+    expect(parseRawMouseInput('\u001b[<0;14;9m')).toEqual({ leftUp: true, col: 13, row: 8 });
   });
 });

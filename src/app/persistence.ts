@@ -19,6 +19,7 @@ import type {
 const CONFIG_FILENAME = 'actoviq-claw.config.json';
 const STATE_FILENAME = 'state.json';
 const HEARTBEAT_FILENAME = 'HEARTBEAT.md';
+const HISTORY_FILENAME_RE = /^chat_[a-z0-9]+_[a-z0-9]+\.json$/iu;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -130,6 +131,10 @@ function normalizeChats(value: unknown): AssistantArchivedChat[] {
           typeof chat.title === 'string' && chat.title.trim()
             ? chat.title
             : defaultChatTitle(createdAt),
+        workspacePath:
+          typeof chat.workspacePath === 'string' && chat.workspacePath.trim()
+            ? path.resolve(chat.workspacePath)
+            : '',
         createdAt,
         updatedAt,
         archivedAt,
@@ -282,6 +287,10 @@ function mergeConfig(defaults: AssistantAppConfig, raw: unknown): AssistantAppCo
       typeof raw.stateDir === 'string' && raw.stateDir.trim()
         ? path.resolve(raw.stateDir)
         : defaults.stateDir,
+    historyDir:
+      typeof raw.historyDir === 'string' && raw.historyDir.trim()
+        ? path.resolve(raw.historyDir)
+        : defaults.historyDir,
     tooling: {
       enableComputerUse:
         typeof tooling.enableComputerUse === 'boolean'
@@ -570,4 +579,38 @@ export async function loadOrCreateState(stateDir: string): Promise<AssistantPers
 
 export async function saveState(stateDir: string, state: AssistantPersistedState): Promise<void> {
   await writeJsonFile(path.join(stateDir, STATE_FILENAME), state);
+}
+
+export async function loadArchivedChats(historyDir: string): Promise<AssistantArchivedChat[]> {
+  if (!(await fileExists(historyDir))) {
+    return [];
+  }
+
+  const { readdir } = await import('node:fs/promises');
+  const files = await readdir(historyDir, { withFileTypes: true });
+  const chats: AssistantArchivedChat[] = [];
+
+  for (const entry of files) {
+    if (!entry.isFile() || !HISTORY_FILENAME_RE.test(entry.name)) {
+      continue;
+    }
+
+    const raw = await readJsonFile<unknown>(path.join(historyDir, entry.name));
+    const normalized = normalizeChats(raw ? [raw] : []);
+    if (normalized[0]) {
+      chats.push(normalized[0]);
+    }
+  }
+
+  return chats.sort((left, right) => right.archivedAt.localeCompare(left.archivedAt));
+}
+
+export async function saveArchivedChats(
+  historyDir: string,
+  chats: readonly AssistantArchivedChat[],
+): Promise<void> {
+  await ensureDirectory(historyDir);
+  await Promise.all(
+    chats.map(chat => writeJsonFile(path.join(historyDir, `${chat.id}.json`), chat)),
+  );
 }

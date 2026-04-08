@@ -1,4 +1,4 @@
-import process from 'node:process';
+﻿import process from 'node:process';
 import { EventEmitter } from 'node:events';
 
 import chalk from 'chalk';
@@ -9,9 +9,19 @@ import stringWidth from 'string-width';
 import wrapAnsi from 'wrap-ansi';
 
 import { Cursor } from './claudecode/Cursor.js';
+import { copyTextToClipboard } from './clipboard.js';
 import type { AssistantLogEntry, AssistantMission, ControllerSnapshot } from './types.js';
 import type { AutonomousAssistantController } from './controller.js';
-import { applyRawInputSequence, withRawTerminalKeys } from './inputSequence.js';
+import { applyRawInputSequence, parseRawMouseInput, withRawTerminalKeys } from './inputSequence.js';
+import {
+  clearScreenSelection,
+  createScreenSelectionState,
+  extractSelectedText,
+  finishScreenSelection,
+  hasScreenSelection,
+  startScreenSelection,
+  updateScreenSelection,
+} from './screenSelection.js';
 import { FullscreenLayout } from './tui/FullscreenLayout.js';
 import {
   type DisplayLine,
@@ -71,6 +81,13 @@ interface PanelLine {
   bold?: boolean;
 }
 
+interface PanelRenderContext {
+  tasksResumePickerActive: boolean;
+  tasksResumeScope: TasksResumeScope;
+  selectedResumeChat?: ControllerSnapshot['archivedChats'][number];
+  heartbeatWorktimePickerActive: boolean;
+}
+
 interface FooterPill {
   id: string;
   label: string;
@@ -78,6 +95,8 @@ interface FooterPill {
   color?: string;
   active?: boolean;
 }
+
+type TasksResumeScope = 'current' | 'all';
 
 const SLASH_COMMANDS: SlashCommandTemplate[] = [
   { value: '/help', description: 'open help and usage notes' },
@@ -93,7 +112,7 @@ const SLASH_COMMANDS: SlashCommandTemplate[] = [
 ];
 
 const MAX_INPUT_VISIBLE_LINES = 6;
-const ASSISTANT_PREFIX = '  ⎿ ';
+const ASSISTANT_PREFIX = '  >';
 const ASSISTANT_CONTINUATION = '    ';
 const USER_MESSAGE_BACKGROUND = '#1f2328';
 const USER_MESSAGE_FOREGROUND = '#f0f6fc';
@@ -106,6 +125,27 @@ function compactText(value: string | undefined, maxLength: number): string {
     return '';
   }
   return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength - 3)}...`;
+}
+
+function fitLine(text: string, width: number): string {
+  const safeWidth = Math.max(0, width);
+  if (safeWidth === 0) {
+    return '';
+  }
+
+  if (stringWidth(text) <= safeWidth) {
+    return `${text}${' '.repeat(Math.max(0, safeWidth - stringWidth(text)))}`;
+  }
+
+  let result = '';
+  for (const character of text) {
+    const next = `${result}${character}`;
+    if (stringWidth(next) > safeWidth) {
+      break;
+    }
+    result = next;
+  }
+  return result;
 }
 
 function firstParagraph(value: string): string {
@@ -201,6 +241,145 @@ function compactPath(value: string): string {
     return parts[0]!;
   }
   return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+}
+
+function formatDateTime(value: string | undefined): string {
+  if (!value) {
+    return 'n/a';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'n/a';
+  }
+  return date.toLocaleString([], {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function isCurrentWorkspaceChat(chat: ControllerSnapshot['archivedChats'][number], workspacePath: string): boolean {
+  return chat.workspacePath === workspacePath;
+}
+
+function isAllDayHeartbeatWindow(activeHours: ControllerSnapshot['heartbeatActiveHours']): boolean {
+  return activeHours?.start === '00:00' && activeHours?.end === '24:00';
+}
+
+function tasksResumeSearch(input: string): string | undefined {
+  const normalized = normalizeCommand(input);
+  if (!normalized.startsWith('resume')) {
+    return undefined;
+  }
+  const search = normalized.slice('resume'.length).trim();
+  if (search === 'last' || search === 'list' || search === 'queue') {
+    return undefined;
+  }
+  return search;
+}
+
+function heartbeatWorktimeSearch(input: string): string | undefined {
+  const normalized = normalizeCommand(input);
+  if (!normalized.startsWith('worktime')) {
+    return undefined;
+  }
+  return normalized.slice('worktime'.length).trim();
+}
+
+function buildTasksResumeSuggestions(
+  input: string,
+  snapshot: ControllerSnapshot,
+  scope: TasksResumeScope,
+): SuggestionOption[] {
+  const search = tasksResumeSearch(input);
+  if (search === undefined) {
+    return [];
+  }
+
+  const chats =
+    scope === 'current'
+      ? snapshot.archivedChats.filter(chat => isCurrentWorkspaceChat(chat, snapshot.workspacePath))
+      : snapshot.archivedChats;
+
+  return chats
+    .filter(chat => {
+      if (!search) {
+        return true;
+      }
+      return (
+        chat.id.toLowerCase().includes(search) ||
+        chat.title.toLowerCase().includes(search) ||
+        chat.preview.toLowerCase().includes(search) ||
+        chat.workspacePath.toLowerCase().includes(search)
+      );
+    })
+    .map(chat => ({
+      id: `tasks:resume:${chat.id}`,
+      value: chat.id,
+      description: `${relativeTimeLabel(chat.updatedAt)} | ${formatDateTime(chat.updatedAt)} | ${chat.workspacePath}`,
+      kind: 'panel' as const,
+      applyValue: `resume ${chat.id}`,
+    }));
+}
+
+function buildHeartbeatWorktimeSuggestions(
+  input: string,
+  snapshot: ControllerSnapshot,
+): SuggestionOption[] {
+  const search = heartbeatWorktimeSearch(input);
+  if (search === undefined) {
+    return [];
+  }
+
+  const options: SuggestionOption[] = [
+    {
+      id: 'heartbeat:worktime:24h',
+      value: '24h',
+      description: 'run heartbeat around the clock',
+      kind: 'panel',
+      applyValue: 'worktime 24h',
+    },
+    {
+      id: 'heartbeat:worktime:hours',
+      value: `hours ${snapshot.heartbeatActiveHours?.start ?? '08:00'} ${snapshot.heartbeatActiveHours?.end ?? '23:30'}`,
+      description: 'set the full active time window',
+      kind: 'panel',
+      applyValue: `worktime hours ${snapshot.heartbeatActiveHours?.start ?? '08:00'} ${snapshot.heartbeatActiveHours?.end ?? '23:30'}`,
+    },
+    {
+      id: 'heartbeat:worktime:start',
+      value: `start ${snapshot.heartbeatActiveHours?.start ?? '08:00'}`,
+      description: 'set heartbeat daily start time',
+      kind: 'panel',
+      applyValue: `worktime start ${snapshot.heartbeatActiveHours?.start ?? '08:00'}`,
+    },
+    {
+      id: 'heartbeat:worktime:end',
+      value: `end ${snapshot.heartbeatActiveHours?.end ?? '23:30'}`,
+      description: 'set heartbeat daily end time',
+      kind: 'panel',
+      applyValue: `worktime end ${snapshot.heartbeatActiveHours?.end ?? '23:30'}`,
+    },
+    {
+      id: 'heartbeat:worktime:timezone',
+      value: `timezone ${snapshot.heartbeatActiveHours?.timezone ?? 'Asia/Shanghai'}`,
+      description: 'set heartbeat timezone or clear it',
+      kind: 'panel',
+      applyValue: `worktime timezone ${snapshot.heartbeatActiveHours?.timezone ?? 'Asia/Shanghai'}`,
+    },
+  ];
+
+  if (!search) {
+    return options;
+  }
+
+  return options.filter(option => {
+    const value = option.value.toLowerCase();
+    const applyValue = option.applyValue?.toLowerCase() ?? '';
+    const description = option.description.toLowerCase();
+    return value.startsWith(search) || value.includes(search) || applyValue.startsWith(`worktime ${search}`) || description.includes(search);
+  });
 }
 
 function simplifyLogText(text: string): string {
@@ -500,7 +679,12 @@ function filterResumeSuggestions(query: string, snapshot: ControllerSnapshot): S
   }
 
   const search = normalized.slice('/resume'.length).trim();
-  return snapshot.archivedChats
+  return [...snapshot.archivedChats]
+    .sort((left, right) => {
+      const leftCurrent = isCurrentWorkspaceChat(left, snapshot.workspacePath) ? 1 : 0;
+      const rightCurrent = isCurrentWorkspaceChat(right, snapshot.workspacePath) ? 1 : 0;
+      return rightCurrent - leftCurrent || right.updatedAt.localeCompare(left.updatedAt);
+    })
     .filter(chat => {
       if (!search) {
         return true;
@@ -508,13 +692,14 @@ function filterResumeSuggestions(query: string, snapshot: ControllerSnapshot): S
       return (
         chat.id.toLowerCase().includes(search) ||
         chat.title.toLowerCase().includes(search) ||
-        chat.preview.toLowerCase().includes(search)
+        chat.preview.toLowerCase().includes(search) ||
+        chat.workspacePath.toLowerCase().includes(search)
       );
     })
     .map(chat => ({
       id: `resume:${chat.id}`,
       value: `/resume ${chat.id}`,
-      description: `${chat.title} · ${chat.preview}`,
+      description: `${relativeTimeLabel(chat.updatedAt)} | ${formatDateTime(chat.updatedAt)} | ${chat.workspacePath}`,
       kind: 'resume' as const,
     }));
 }
@@ -591,6 +776,17 @@ function suggestionApplyValue(option: SuggestionOption | undefined): string | un
   return option.applyValue ?? option.value;
 }
 
+function findSuggestionIndexByApplyValue(
+  matches: readonly SuggestionOption[],
+  applyValue: string | undefined,
+): number {
+  if (!applyValue) {
+    return -1;
+  }
+  const normalized = applyValue.trim().toLowerCase();
+  return matches.findIndex(option => suggestionApplyValue(option)?.trim().toLowerCase() === normalized);
+}
+
 function panelCommandTemplates(panel: OverlayPanel, snapshot: ControllerSnapshot): PanelCommandTemplate[] {
   switch (panel) {
     case 'status':
@@ -599,14 +795,17 @@ function panelCommandTemplates(panel: OverlayPanel, snapshot: ControllerSnapshot
         { value: 'resume', description: 'resume the autonomous queue' },
         { value: 'newchat', description: 'start a fresh chat window' },
         { value: 'sessions', description: 'list recent SDK sessions' },
+        { value: 'history', description: 'show the current history storage path' },
+        { value: 'history-dir ./.actoviq-claw/history', description: 'change the history storage path' },
       ];
     case 'tasks': {
       const active = activeMission(snapshot);
       return [
         { value: 'pause', description: 'pause the autonomous queue' },
-        { value: 'resume last', description: 'resume the latest archived chat' },
-        { value: 'resume list', description: 'list archived chats' },
-        { value: 'resume queue', description: 'resume the paused queue' },
+        {
+          value: 'resume',
+          description: 'open the archived-chat picker for this workspace first; Tab shows all workspaces',
+        },
         {
           value: active ? `cancel ${active.id}` : 'cancel <mission-id>',
           description: 'cancel a queued or running mission',
@@ -621,20 +820,8 @@ function panelCommandTemplates(panel: OverlayPanel, snapshot: ControllerSnapshot
         { value: 'toggle', description: 'toggle heartbeat mode' },
         { value: `every ${snapshot.heartbeatIntervalMinutes}`, description: 'set heartbeat interval in minutes' },
         {
-          value: `start ${snapshot.heartbeatActiveHours?.start ?? '08:00'}`,
-          description: 'set heartbeat daily start time',
-        },
-        {
-          value: `end ${snapshot.heartbeatActiveHours?.end ?? '23:30'}`,
-          description: 'set heartbeat daily end time',
-        },
-        {
-          value: `hours ${snapshot.heartbeatActiveHours?.start ?? '08:00'} ${snapshot.heartbeatActiveHours?.end ?? '23:30'}`,
-          description: 'set the full active time window',
-        },
-        {
-          value: `timezone ${snapshot.heartbeatActiveHours?.timezone ?? 'Asia/Shanghai'}`,
-          description: 'set heartbeat timezone or clear it',
+          value: 'worktime',
+          description: 'open the heartbeat worktime picker for 24h or daily hours',
         },
         {
           value: `file ${compactPath(snapshot.heartbeatGuideFilePath) || './HEARTBEAT.md'}`,
@@ -733,9 +920,24 @@ function filterPanelCommands(
   panel: OverlayPanel | 'none',
   input: string,
   snapshot: ControllerSnapshot,
+  tasksResumeScope: TasksResumeScope,
 ): SuggestionOption[] {
   if (panel === 'none') {
     return [];
+  }
+
+  if (panel === 'tasks') {
+    const resumeSuggestions = buildTasksResumeSuggestions(input, snapshot, tasksResumeScope);
+    if (resumeSuggestions.length > 0 || tasksResumeSearch(input) !== undefined) {
+      return resumeSuggestions;
+    }
+  }
+
+  if (panel === 'heartbeat') {
+    const worktimeSuggestions = buildHeartbeatWorktimeSuggestions(input, snapshot);
+    if (worktimeSuggestions.length > 0 || heartbeatWorktimeSearch(input) !== undefined) {
+      return worktimeSuggestions;
+    }
   }
 
   const normalized = input.trim().toLowerCase();
@@ -796,26 +998,53 @@ function slashCommandArgumentHint(input: string): string | undefined {
   }
 }
 
-function panelCommandArgumentHint(panel: OverlayPanel | 'none', input: string): string | undefined {
+function panelCommandArgumentHint(
+  panel: OverlayPanel | 'none',
+  input: string,
+  tasksResumeScope: TasksResumeScope,
+  snapshot: ControllerSnapshot,
+): string | undefined {
   if (panel === 'none') {
     return undefined;
+  }
+
+  if (panel === 'tasks') {
+    const resumeSearch = tasksResumeSearch(input);
+    if (resumeSearch !== undefined) {
+      const currentWorkspaceCount = snapshot.archivedChats.filter(chat =>
+        isCurrentWorkspaceChat(chat, snapshot.workspacePath),
+      ).length;
+      const totalCount = snapshot.archivedChats.length;
+      return tasksResumeScope === 'current'
+        ? `Current workspace IDs: ${currentWorkspaceCount}. Tab shows all IDs (${totalCount}).`
+        : `All workspaces: ${totalCount} IDs. Tab returns to current workspace (${currentWorkspaceCount}).`;
+    }
+  }
+
+  if (panel === 'heartbeat') {
+    const worktimeSearch = heartbeatWorktimeSearch(input);
+    if (worktimeSearch !== undefined) {
+      return 'Heartbeat worktime: choose 24h, or set hours/start/end/timezone for the daily active window.';
+    }
   }
 
   const normalized = normalizeCommand(input);
   switch (`${panel}:${normalized}`) {
     case 'tasks:resume':
-      return 'resume <chat-id|last|list|queue>';
+      return 'Enter to open the archived chat picker. Tab inside the picker shows all workspaces.';
     case 'tasks:cancel':
       return 'cancel <mission-id>';
     case 'heartbeat:every':
     case 'heartbeat:interval':
       return 'every <minutes>';
+    case 'heartbeat:worktime':
+      return 'Enter to open the heartbeat worktime picker.';
     case 'heartbeat:start':
       return 'start <HH:MM>';
     case 'heartbeat:end':
       return 'end <HH:MM>';
     case 'heartbeat:hours':
-      return 'hours <HH:MM> <HH:MM>';
+      return 'hours <HH:MM> <HH:MM>  (24:00 allowed for all-day end)';
     case 'heartbeat:timezone':
       return 'timezone <IANA name|clear>';
     case 'heartbeat:file':
@@ -1115,6 +1344,9 @@ function footerHint(
   snapshot: ControllerSnapshot,
   activePanel: OverlayPanel | 'none',
   suggestionsVisible: boolean,
+  tasksResumeScope: TasksResumeScope,
+  tasksResumePickerActive: boolean,
+  heartbeatWorktimePickerActive: boolean,
   atBottom: boolean,
   active: AssistantMission | undefined,
   escapePending: boolean,
@@ -1122,11 +1354,19 @@ function footerHint(
   if (escapePending) return 'Esc again to clear';
   if (suggestionsVisible) {
     if (activePanel !== 'none') {
-      return 'Up/Down move  Enter run  Tab insert  Esc dismiss';
+      if (activePanel === 'tasks' && tasksResumePickerActive) {
+        return tasksResumeScope === 'current'
+          ? 'Up/Down move  Enter resume  Tab show all IDs  wheel/PageUp/PageDown scroll content  Esc dismiss'
+          : 'Up/Down move  Enter resume  Tab current workspace only  wheel/PageUp/PageDown scroll content  Esc dismiss';
+      }
+      if (activePanel === 'heartbeat' && heartbeatWorktimePickerActive) {
+        return 'Up/Down move  Enter apply  Tab insert  wheel/PageUp/PageDown scroll content  Esc dismiss';
+      }
+      return 'Up/Down move  Enter run  Tab insert  wheel/PageUp/PageDown scroll content  Esc dismiss';
     }
     return 'Up/Down move  Tab accept  Esc dismiss';
   }
-  if (activePanel !== 'none') return `${panelLabel(activePanel)} open  Enter panel command  Esc close  / commands`;
+  if (activePanel !== 'none') return `${panelLabel(activePanel)} open  Enter panel command  wheel/PageUp/PageDown scroll content  Esc close`;
   if (!atBottom) return 'Viewing earlier messages  Up/Down, wheel, or PageDown toward newest';
   if (active) return `Running ${compactText(active.title, 56)}  Esc interrupt`;
   if (snapshot.paused) return 'Queue paused  /resume queue to continue  / commands';
@@ -1166,7 +1406,11 @@ function pushSection(lines: PanelLine[], key: string, title: string, body: strin
   lines.push({ key: `${key}:gap`, text: '', tone: 'muted' });
 }
 
-function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): PanelLine[] {
+function buildPanelLines(
+  panel: OverlayPanel,
+  snapshot: ControllerSnapshot,
+  context: PanelRenderContext,
+): PanelLine[] {
   const lines: PanelLine[] = [];
   const queued = formatMissionCount(snapshot, 'queued');
   const running = formatMissionCount(snapshot, 'running');
@@ -1175,30 +1419,87 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
   const active = activeMission(snapshot);
 
   switch (panel) {
-    case 'help':
-      pushSection(lines, 'help:ask', 'Ask', [
-        'Type plain text and press Enter to queue a task.',
-        'Use @ to mention workspace files.',
+    case 'help': {
+      const currentToolList = snapshot.effectiveAllowedTools.join(', ') || 'none';
+      const availableToolCategories =
+        Array.from(new Set(snapshot.availableTools.map(tool => tool.category))).join(', ') || 'none';
+      pushSection(lines, 'help:start', 'Quick Start', [
+        'Type plain text and press Enter to queue a mission.',
+        'Type / to open the command entry palette.',
+        'Type @ to mention workspace files or paths.',
+        'Use Shift+Enter to insert a newline without sending.',
       ]);
-      pushSection(lines, 'help:panels', 'Panels', [
-        '/status  /tasks  /heartbeat  /memory  /dream  /buddy  /tools  /permission',
-        '/close closes the current panel. /resume reopens archived chats.',
+      pushSection(lines, 'help:mode', 'Current Runtime', [
+        `workspace: ${snapshot.workspacePath}`,
+        `model: ${snapshot.detectedModel ?? 'unknown'}`,
+        `permission preset: ${snapshot.permissionPreset}`,
+        `configured tools: ${snapshot.configuredAllowedTools.length}/${snapshot.availableTools.length}`,
+        `effective tools: ${currentToolList}`,
       ]);
-      pushSection(lines, 'help:actions', 'Panel Commands', [
-        'Slash commands are entry points now.',
-        'Open a panel first, then type local commands like "tick" or "file ./ops/heartbeat.md".',
+      pushSection(lines, 'help:panels', 'Panels And Jobs', [
+        '/status      inspect runtime, queue state, model, and the current chat',
+        '/tasks       inspect missions, background jobs, archived chats, and resume targets',
+        '/heartbeat   configure unattended checks, schedule, active hours, and guide file',
+        '/memory      inspect surfaced memories, session summary, and memory manifest',
+        '/dream       inspect consolidation state and trigger a dream run',
+        '/buddy       inspect and control the companion persona and reactions',
+        '/tools       inspect every registered tool and toggle allowlist entries',
+        '/permission  switch between chat-only, workspace-only, and full-access',
       ]);
-      pushSection(lines, 'help:keys', 'Keys', [
-        'Up/Down or Ctrl+N/Ctrl+P move suggestions  Tab accepts',
-        'Esc close panel or clear input',
-        'PageUp/PageDown scroll transcript  Ctrl+C exit',
+      pushSection(lines, 'help:panel-usage', 'How Panel Commands Work', [
+        'Slash commands are entry points now. Open a panel first, then run local commands inside it.',
+        'Use Up/Down to select a quick action, Enter to apply it, or Tab to insert it into the prompt for editing.',
+        'Mouse wheel, PageUp/PageDown, Home, and End scroll the panel body or transcript. They do not select quick actions.',
+        'Use /close or Esc on an empty prompt to close the current panel.',
+      ]);
+      pushSection(lines, 'help:history', 'Chat History', [
+        'Every chat already has a stable chat id such as chat_abcd1234_xyz987.',
+        'Chats are persisted individually by id in the history directory so they can be resumed later.',
+        'Use /tasks, choose resume, and then pick a chat id. The picker shows current-workspace ids first.',
+        'Use /status and run history or history-dir <path> to inspect or change where chat history is stored.',
+      ]);
+      pushSection(lines, 'help:tools', 'Tools And Permissions', [
+        `available categories: ${availableToolCategories}`,
+        'The /tools panel shows everything currently registered in the SDK runtime, including computer-use and future MCP tools.',
+        'The /permission preset sets the broad safety envelope. The /tools allowlist chooses the exact tools inside that envelope.',
+        'Effective tools are always the intersection of the permission preset and the tool allowlist.',
+        'Computer-use tools are registered by default so they appear in /tools, but they are not in the default allowlist until you enable them.',
+      ]);
+      pushSection(lines, 'help:automation', 'Autonomy Features', [
+        'Heartbeat runs unattended operational checks on a schedule and follows HEARTBEAT.md if present.',
+        'Memory extracts durable context after runs and surfaces relevant project facts back into future turns.',
+        'Dream handles longer-cycle consolidation when enough sessions or time have accumulated.',
+        'Buddy is the companion layer: persona, reactions, intro text, mute state, and presence in the dock.',
+      ]);
+      pushSection(lines, 'help:examples', 'Useful Examples', [
+        'plain task: audit this repo and list the top 5 release risks',
+        '@ mention: summarize @README.md and compare it with @src/app/controller.ts',
+        '/heartbeat then: tick  |  every 30  |  worktime -> 24h',
+        '/tools then: show  |  enable category computer  |  disable Task',
+        '/permission then: workspace-only  |  full-access',
+        '/tasks then: resume  |  Tab all workspaces  |  cancel <mission-id>',
+      ]);
+      pushSection(lines, 'help:keys', 'Keyboard Reference', [
+        'Up/Down moves suggestions when a suggestion list is open, browses history when the prompt has text, and scrolls chat when the prompt is empty.',
+        'Ctrl+N / Ctrl+P also move the current suggestion list.',
+        'Tab accepts the selected suggestion. Shift+Tab moves backward inside the suggestion list.',
+        'Esc dismisses suggestions first, then closes the active panel, then clears the prompt on a second press.',
+        'Ctrl+C or Ctrl+Q exits the TUI.',
+      ]);
+      pushSection(lines, 'help:recovery', 'Recovery And Session Flow', [
+        'Every launch opens a fresh chat window.',
+        'Use /resume <chat-id> directly, or open /tasks and enter the resume picker to choose a chat id.',
+        'If a mission is running, Esc from an empty prompt interrupts the active mission.',
+        'If the queue is paused, use /status or /tasks and run resume.',
       ]);
       break;
+    }
     case 'status':
       pushSection(lines, 'status:chat', 'Chat', [
         `current: ${snapshot.currentChatTitle}`,
         `chat id: ${snapshot.currentChatId}`,
         `archived chats: ${snapshot.archivedChats.length}`,
+        `history dir: ${snapshot.historyDir}`,
       ]);
       pushSection(lines, 'status:runtime', 'Runtime', [
         `workspace: ${snapshot.workspacePath}`,
@@ -1218,10 +1519,24 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
         `auto dream: ${snapshot.autoDreamEnabled ? 'on' : 'off'}`,
       ]);
       pushSection(lines, 'status:actions', 'Panel Commands', [
-        'pause  resume  newchat  /permission  /tools',
+        'pause  resume  newchat  sessions  history  history-dir <path>',
       ]);
       break;
     case 'tasks': {
+      const currentWorkspaceChats = snapshot.archivedChats.filter(chat =>
+        isCurrentWorkspaceChat(chat, snapshot.workspacePath),
+      );
+      const visibleResumeChats =
+        context.tasksResumeScope === 'current'
+          ? currentWorkspaceChats
+          : snapshot.archivedChats;
+      if (context.tasksResumePickerActive) {
+        pushSection(lines, 'tasks:resume-picker', 'Resume Picker', [
+          `scope: ${context.tasksResumeScope === 'current' ? 'current workspace only' : 'all workspaces'}`,
+          `showing: ${visibleResumeChats.length} ids`,
+          'Tab toggles between current-workspace ids and all-workspace ids.',
+        ]);
+      }
       const recentMissions = [...snapshot.missions]
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
         .slice(0, 6);
@@ -1246,17 +1561,31 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
             });
       pushSection(lines, 'tasks:background', 'Background Tasks', backgroundBody);
       const archivedBody =
-        snapshot.archivedChats.length === 0
-          ? ['No archived chats yet.']
-          : snapshot.archivedChats.slice(0, 6).map(chat => `${chat.id}  ${compactText(chat.title, 28)}  ${chat.preview}`);
+        currentWorkspaceChats.length === 0
+          ? [
+              'No archived chats for this workspace yet.',
+              'Use resume, then press Tab to browse all workspaces.',
+            ]
+          : currentWorkspaceChats.slice(0, 6).map(
+              chat =>
+                `${chat.id}  ${relativeTimeLabel(chat.updatedAt)}  ${compactPath(chat.workspacePath)}  ${compactText(chat.title, 24)}`,
+            );
       pushSection(lines, 'tasks:archived', 'Archived Chats', archivedBody);
       pushSection(lines, 'tasks:actions', 'Panel Commands', [
-        'pause  resume [chat-id|last|list|queue]  cancel <mission-id>',
+        'pause  resume  cancel <mission-id>',
       ]);
       break;
     }
     case 'heartbeat': {
       const activeHours = snapshot.heartbeatActiveHours;
+      const allDayHeartbeat = isAllDayHeartbeatWindow(activeHours);
+      if (context.heartbeatWorktimePickerActive) {
+        pushSection(lines, 'heartbeat:worktime-picker', 'Worktime Picker', [
+          `current: ${allDayHeartbeat ? 'all day (24h)' : `${activeHours?.start ?? '08:00'} -> ${activeHours?.end ?? '23:30'}`}`,
+          'Choose 24h, or set hours/start/end for the daily active window.',
+        ]);
+        break;
+      }
       pushSection(lines, 'heartbeat:state', 'State', [
         `enabled: ${snapshot.heartbeatEnabled ? 'on' : 'off'}`,
         `interval: every ${snapshot.heartbeatIntervalMinutes}m`,
@@ -1265,8 +1594,7 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
         `last: ${formatClock(snapshot.heartbeats.lastTickAt)}  result: ${compactText(snapshot.heartbeats.lastResult, 90) || 'n/a'}`,
       ]);
       pushSection(lines, 'heartbeat:window', 'Active Window', [
-        `start: ${activeHours?.start ?? '08:00'}`,
-        `end: ${activeHours?.end ?? '23:30'}`,
+        `window: ${allDayHeartbeat ? 'all day (24h)' : `${activeHours?.start ?? '08:00'} -> ${activeHours?.end ?? '23:30'}`}`,
         `timezone: ${activeHours?.timezone ?? 'local terminal time'}`,
       ]);
       pushSection(lines, 'heartbeat:file', 'Guide File', [
@@ -1274,8 +1602,7 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
       ]);
       pushSection(lines, 'heartbeat:actions', 'Panel Commands', [
         'on  off  toggle  tick',
-        'every <minutes>  start <HH:MM>  end <HH:MM>',
-        'hours <HH:MM> <HH:MM>  timezone <name|clear>',
+        'every <minutes>  worktime',
         'file <path>  isolated <on|off>',
       ]);
       break;
@@ -1425,11 +1752,17 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
   return lines;
 }
 
-function panelDisplayLines(panel: OverlayPanel, snapshot: ControllerSnapshot, width: number, maxRows: number): DisplayLine[] {
-  const bodyWidth = Math.max(16, width - 4);
+function panelDisplayLines(
+  panel: OverlayPanel,
+  snapshot: ControllerSnapshot,
+  width: number,
+  maxRows: number,
+  context: PanelRenderContext,
+): DisplayLine[] {
+  const bodyWidth = Math.max(15, width - 5);
   const flattened: DisplayLine[] = [];
 
-  for (const line of buildPanelLines(panel, snapshot)) {
+  for (const line of buildPanelLines(panel, snapshot, context)) {
     if (!line.text) {
       flattened.push({ key: `${line.key}:gap`, text: '', dimColor: true });
       continue;
@@ -1446,11 +1779,214 @@ function panelDisplayLines(panel: OverlayPanel, snapshot: ControllerSnapshot, wi
     });
   }
 
-  if (flattened.length <= maxRows) {
+  if (maxRows === Number.POSITIVE_INFINITY || flattened.length <= maxRows) {
     return flattened;
   }
 
   return [...flattened.slice(0, Math.max(0, maxRows - 1)), { key: 'panel:more', text: '  ...', dimColor: true }];
+}
+
+function buildPanelScrollbar(totalHeight: number, viewportHeight: number, scrollTop: number): string[] {
+  if (viewportHeight <= 0) {
+    return [];
+  }
+  if (totalHeight <= viewportHeight) {
+    return Array.from({ length: viewportHeight }, () => ' ');
+  }
+
+  const maxScroll = Math.max(1, totalHeight - viewportHeight);
+  const handleSize = Math.max(1, Math.round((viewportHeight * viewportHeight) / totalHeight));
+  const maxHandleStart = Math.max(0, viewportHeight - handleSize);
+  const handleStart = Math.round((scrollTop / maxScroll) * maxHandleStart);
+
+  return Array.from({ length: viewportHeight }, (_, row) =>
+    row >= handleStart && row < handleStart + handleSize ? '#' : '|',
+  );
+}
+
+function visibleTranscriptPlainLines(
+  layout: ReturnType<typeof useTranscriptLayout>,
+  scroll: ReturnType<typeof useVirtualScroll>,
+  height: number,
+  width: number,
+): string[] {
+  const [start, end] = scroll.range;
+  const pool: DisplayLine[] = [];
+
+  for (let index = start; index < end; index += 1) {
+    pool.push(...(layout.blocks[index]?.lines ?? []));
+  }
+
+  const windowed = pool.slice(scroll.localOffset, scroll.localOffset + height);
+  while (windowed.length < height) {
+    windowed.push({ key: `plain:blank:${windowed.length}`, text: '' });
+  }
+
+  const contentWidth = Math.max(4, width - 1);
+  return windowed.map(line =>
+    line.prefixText
+      ? `${line.prefixText}${fitLine(line.text || ' ', Math.max(0, contentWidth - stringWidth(line.prefixText)))}`
+      : fitLine(line.text || ' ', contentWidth),
+  );
+}
+
+function panelQuickActionVisibleCount(
+  panel: OverlayPanel,
+  detailLines?: string[],
+): number {
+  if (panel === 'tasks' && detailLines && detailLines.length > 0) {
+    return 5;
+  }
+  return detailLines && detailLines.length > 0 ? 4 : 7;
+}
+
+function panelQuickActionReservedRows(props: {
+  panel: OverlayPanel;
+  width: number;
+  matches: SuggestionOption[];
+  detailLines?: string[];
+}): number {
+  if (props.matches.length === 0) {
+    return 4;
+  }
+
+  const contentWidth = Math.max(20, props.width - 4);
+  const visibleCount = Math.min(
+    props.matches.length,
+    panelQuickActionVisibleCount(props.panel, props.detailLines),
+  );
+  const detailWrappedRows =
+    props.detailLines?.reduce(
+      (sum, line) => sum + wrapLines(line, contentWidth).length,
+      0,
+    ) ?? 0;
+  const detailSectionRows = detailWrappedRows > 0 ? detailWrappedRows + 1 : 0;
+  const overflowRows = props.matches.length > visibleCount ? 1 : 0;
+
+  // PanelView spends 3 rows on top chrome (padding, title, spacing) and
+  // Quick Actions itself needs 2 rows of chrome (top margin + header row)
+  // before details/items start rendering.
+  return 5 + detailSectionRows + visibleCount + overflowRows;
+}
+
+function panelMinimumBodyRows(
+  panel: OverlayPanel,
+  context: PanelRenderContext,
+): number {
+  if (panel === 'tasks' && context.tasksResumePickerActive) {
+    return 2;
+  }
+  if (panel === 'heartbeat' && context.heartbeatWorktimePickerActive) {
+    return 2;
+  }
+  return 3;
+}
+
+function plainPanelQuickActionLines(props: {
+  panel: OverlayPanel;
+  matches: SuggestionOption[];
+  selectedIndex: number;
+  width: number;
+  hint?: string;
+  detailLines?: string[];
+}): string[] {
+  if (props.matches.length === 0) {
+    return [];
+  }
+
+  const maxVisible = panelQuickActionVisibleCount(props.panel, props.detailLines);
+  const clampedIndex =
+    props.matches.length === 0 ? 0 : Math.max(0, Math.min(props.selectedIndex, props.matches.length - 1));
+  const { items: visibleMatches, start } = paletteWindow(props.matches, clampedIndex, maxVisible);
+  const selectedId = props.matches[clampedIndex]?.id ?? visibleMatches[0]?.id;
+  const contentWidth = Math.max(20, props.width - 4);
+  const markerWidth = 1;
+  const labelWidth = Math.max(18, Math.min(Math.floor(contentWidth * 0.4), contentWidth - 10));
+  const detailWidth = Math.max(0, contentWidth - markerWidth - labelWidth);
+
+  const lines = [
+    fitLine(`  Quick Actions  ${props.hint ?? 'Up/Down select  Enter apply  Tab insert'}`, contentWidth),
+  ];
+
+  if (props.detailLines) {
+    for (const detail of props.detailLines) {
+      for (const wrapped of wrapLines(detail, contentWidth)) {
+        lines.push(fitLine(wrapped, contentWidth));
+      }
+    }
+  }
+
+  for (const option of visibleMatches) {
+    const selected = option.id === selectedId;
+    const labelText = fitLine(` ${compactText(option.value, Math.max(8, labelWidth - 1))}`, labelWidth);
+    const detailText = detailWidth > 0
+      ? fitLine(` ${compactText(option.description, Math.max(8, detailWidth - 1))}`, detailWidth)
+      : '';
+    lines.push(`${selected ? '>' : ' '}${labelText}${detailText}`);
+  }
+
+  if (props.matches.length > visibleMatches.length) {
+    lines.push(fitLine(`Showing ${start + 1}-${start + visibleMatches.length} of ${props.matches.length}`, contentWidth));
+  }
+
+  return lines;
+}
+
+function visiblePanelPlainLines(props: {
+  panel: OverlayPanel;
+  snapshot: ControllerSnapshot;
+  width: number;
+  height: number;
+  scrollTop: number;
+  panelContext: PanelRenderContext;
+  panelSuggestionsVisible: boolean;
+  suggestions: SuggestionOption[];
+  selectedSuggestionIndex: number;
+  suggestionsHint?: string;
+  suggestionDetailLines?: string[];
+}): string[] {
+  const reservedRows = props.panelSuggestionsVisible
+    ? panelQuickActionReservedRows({
+        panel: props.panel,
+        width: props.width,
+        matches: props.suggestions,
+        detailLines: props.suggestionDetailLines,
+      })
+    : 4;
+  const bodyHeight = Math.max(panelMinimumBodyRows(props.panel, props.panelContext), props.height - reservedRows);
+  const bodyLines = panelDisplayLines(
+    props.panel,
+    props.snapshot,
+    props.width,
+    Number.POSITIVE_INFINITY,
+    props.panelContext,
+  );
+  const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
+  const clampedScrollTop = Math.max(0, Math.min(maxScroll, props.scrollTop));
+  const visibleBodyLines = bodyLines.slice(clampedScrollTop, clampedScrollTop + bodyHeight);
+  while (visibleBodyLines.length < bodyHeight) {
+    visibleBodyLines.push({ key: `panel:plain:blank:${visibleBodyLines.length}`, text: '' });
+  }
+
+  const lines = [''];
+  lines.push(`  ${panelLabel(props.panel)}`);
+  lines.push('');
+  lines.push(...visibleBodyLines.map(line => fitLine(line.text || ' ', Math.max(15, props.width - 5))));
+
+  if (props.panelSuggestionsVisible) {
+    lines.push(
+      ...plainPanelQuickActionLines({
+        panel: props.panel,
+        matches: props.suggestions,
+        selectedIndex: props.selectedSuggestionIndex,
+        width: props.width,
+        hint: props.suggestionsHint,
+        detailLines: props.suggestionDetailLines,
+      }),
+    );
+  }
+
+  return lines;
 }
 
 function enterAlternateScreen(): void {
@@ -1529,11 +2065,15 @@ function FooterSuggestions(props: {
   selectedIndex: number;
   width: number;
 }): React.ReactNode {
-  const { items: visibleMatches, start } = paletteWindow(props.matches, props.selectedIndex, 5);
+  const clampedIndex =
+    props.matches.length === 0 ? 0 : Math.max(0, Math.min(props.selectedIndex, props.matches.length - 1));
+  const { items: visibleMatches, start } = paletteWindow(props.matches, clampedIndex, 5);
+  const rowWidth = Math.max(12, props.width - 4);
   const labelWidth = Math.min(
     Math.max(...visibleMatches.map(command => stringWidth(command.value)), 0) + 2,
     Math.max(18, Math.floor(props.width * 0.45)),
   );
+  const detailWidth = Math.max(0, rowWidth - labelWidth);
 
   return (
     <Box flexDirection="column" paddingX={2}>
@@ -1541,21 +2081,21 @@ function FooterSuggestions(props: {
         <Text dimColor>No matching command.</Text>
       ) : (
         visibleMatches.map((command, index) => {
-          const selected = start + index === props.selectedIndex;
+          const selected = start + index === clampedIndex;
           const label = `${suggestionIcon(command)} ${command.value}`;
-          const padded = `${label}${' '.repeat(Math.max(0, labelWidth - stringWidth(label)))}`;
+          const padded = fitLine(label, labelWidth);
           return (
             <Box key={command.id}>
               <Text backgroundColor={selected ? 'cyan' : 'black'} color={selected ? 'black' : 'white'}>
                 {padded}
               </Text>
-              <Text dimColor>{`  ${command.description}`}</Text>
+              <Text dimColor>{fitLine(`  ${command.description}`, detailWidth)}</Text>
             </Box>
           );
         })
       )}
       {props.matches.length > visibleMatches.length ? (
-        <Text dimColor>{`Showing ${start + 1}-${start + visibleMatches.length} of ${props.matches.length}`}</Text>
+        <Text dimColor>{fitLine(`Showing ${start + 1}-${start + visibleMatches.length} of ${props.matches.length}`, rowWidth)}</Text>
       ) : null}
     </Box>
   );
@@ -1567,14 +2107,23 @@ function PanelQuickActions(props: {
   matches: SuggestionOption[];
   selectedIndex: number;
   width: number;
+  hint?: string;
+  detailLines?: string[];
 }): React.ReactNode {
-  const { items: visibleMatches, start } = paletteWindow(props.matches, props.selectedIndex, 7);
-  const selectedId = props.matches[props.selectedIndex]?.id;
+  const maxVisible = panelQuickActionVisibleCount(props.panel, props.detailLines);
+  const clampedIndex =
+    props.matches.length === 0 ? 0 : Math.max(0, Math.min(props.selectedIndex, props.matches.length - 1));
+  const { items: visibleMatches, start } = paletteWindow(props.matches, clampedIndex, maxVisible);
 
   if (visibleMatches.length === 0) {
     return null;
   }
 
+  const contentWidth = Math.max(20, props.width - 4);
+  const markerWidth = 1;
+  const labelWidth = Math.max(18, Math.min(Math.floor(contentWidth * 0.4), contentWidth - 10));
+  const detailWidth = Math.max(0, contentWidth - markerWidth - labelWidth);
+  const selectedId = props.matches[clampedIndex]?.id ?? visibleMatches[0]?.id;
   const rows = visibleMatches.map(option => {
     const selected = option.id === selectedId;
     let label = option.value;
@@ -1603,6 +2152,9 @@ function PanelQuickActions(props: {
       }
     }
 
+    const labelText = fitLine(` ${compactText(label, Math.max(8, labelWidth - 1))}`, labelWidth);
+    const detailText = fitLine(` ${compactText(detail, Math.max(8, detailWidth - 1))}`, detailWidth);
+
     return (
       <Box key={option.id} paddingX={2}>
         <Text color={accent} backgroundColor={selected ? 'cyan' : undefined} dimColor={selected ? false : dim} bold={selected}>
@@ -1614,9 +2166,9 @@ function PanelQuickActions(props: {
           dimColor={selected ? false : dim}
           bold={selected}
         >
-          {` ${compactText(label, Math.max(18, Math.floor(props.width * 0.45)))}`}
+          {labelText}
         </Text>
-        <Text dimColor={!selected}>{`  ${compactText(detail, Math.max(16, props.width - 22))}`}</Text>
+        {detailWidth > 0 ? <Text dimColor={!selected}>{detailText}</Text> : null}
       </Box>
     );
   });
@@ -1625,12 +2177,25 @@ function PanelQuickActions(props: {
     <Box flexDirection="column" marginTop={1}>
       <Box paddingX={2}>
         <Text color="cyan" bold>Quick Actions</Text>
-        <Text dimColor>{`  Up/Down select  Enter apply  Tab insert`}</Text>
+        <Text dimColor>
+          {fitLine(props.hint ?? '  Up/Down select  Enter apply  Tab insert', Math.max(0, contentWidth - 13))}
+        </Text>
       </Box>
+      {props.detailLines && props.detailLines.length > 0 ? (
+        <Box flexDirection="column" paddingX={2} marginTop={1}>
+          {props.detailLines.flatMap((line, lineIndex) =>
+            wrapLines(line, contentWidth).map((wrappedLine, wrapIndex) => (
+              <Text key={`detail:${lineIndex}:${wrapIndex}`} dimColor={lineIndex > 0} color={lineIndex === 0 ? 'cyan' : undefined}>
+                {fitLine(wrappedLine, contentWidth)}
+              </Text>
+            )),
+          )}
+        </Box>
+      ) : null}
       {rows}
       {props.matches.length > visibleMatches.length ? (
         <Box paddingX={2}>
-          <Text dimColor>{`Showing ${start + 1}-${start + visibleMatches.length} of ${props.matches.length}`}</Text>
+          <Text dimColor>{fitLine(`Showing ${start + 1}-${start + visibleMatches.length} of ${props.matches.length}`, contentWidth)}</Text>
         </Box>
       ) : null}
     </Box>
@@ -1640,7 +2205,7 @@ function PanelQuickActions(props: {
 function ArgumentHintRow(props: { text: string; width: number }): React.ReactNode {
   return (
     <Box paddingX={2}>
-      <Text dimColor>{compactText(props.text, Math.max(12, props.width - 4))}</Text>
+      <Text dimColor>{fitLine(compactText(props.text, Math.max(12, props.width - 4)), Math.max(12, props.width - 4))}</Text>
     </Box>
   );
 }
@@ -1650,17 +2215,41 @@ function PanelView(props: {
   snapshot: ControllerSnapshot;
   width: number;
   height: number;
+  scrollTop: number;
+  panelContext: PanelRenderContext;
   panelSuggestionsVisible: boolean;
   suggestions: SuggestionOption[];
   selectedSuggestionIndex: number;
+  suggestionsHint?: string;
+  suggestionDetailLines?: string[];
 }): React.ReactNode {
-  const reservedRows = props.panelSuggestionsVisible ? 11 : 4;
+  const reservedRows = props.panelSuggestionsVisible
+    ? panelQuickActionReservedRows({
+        panel: props.panel,
+        width: props.width,
+        matches: props.suggestions,
+        detailLines: props.suggestionDetailLines,
+      })
+    : 4;
+  const bodyHeight = Math.max(panelMinimumBodyRows(props.panel, props.panelContext), props.height - reservedRows);
   const bodyLines = panelDisplayLines(
     props.panel,
     props.snapshot,
     props.width,
-    Math.max(3, props.height - reservedRows),
+    Number.POSITIVE_INFINITY,
+    props.panelContext,
   );
+  const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
+  const clampedScrollTop = Math.max(0, Math.min(maxScroll, props.scrollTop));
+  const visibleBodyLines = bodyLines.slice(clampedScrollTop, clampedScrollTop + bodyHeight);
+  while (visibleBodyLines.length < bodyHeight) {
+    visibleBodyLines.push({
+      key: `panel:blank:${visibleBodyLines.length}`,
+      text: '',
+      dimColor: true,
+    });
+  }
+  const scrollbar = buildPanelScrollbar(bodyLines.length, bodyHeight, clampedScrollTop);
 
   return (
     <Box flexDirection="column" paddingTop={1}>
@@ -1668,10 +2257,15 @@ function PanelView(props: {
         <Text color="cyan" bold>{panelLabel(props.panel)}</Text>
       </Box>
       <Box flexDirection="column">
-        {bodyLines.map(line => (
-          <Text key={line.key} color={line.color} backgroundColor={line.backgroundColor} dimColor={line.dimColor} bold={line.bold}>
-            {line.text || ' '}
-          </Text>
+        {visibleBodyLines.map((line, index) => (
+          <Box key={line.key}>
+            <Text color={line.color} backgroundColor={line.backgroundColor} dimColor={line.dimColor} bold={line.bold}>
+              {fitLine(line.text || ' ', Math.max(15, props.width - 5))}
+            </Text>
+            <Text dimColor={scrollbar[index] !== '#'} color={scrollbar[index] === '#' ? 'cyan' : 'gray'}>
+              {scrollbar[index] ?? ' '}
+            </Text>
+          </Box>
         ))}
       </Box>
       {props.panelSuggestionsVisible ? (
@@ -1681,6 +2275,8 @@ function PanelView(props: {
           matches={props.suggestions}
           selectedIndex={props.selectedSuggestionIndex}
           width={props.width}
+          hint={props.suggestionsHint}
+          detailLines={props.suggestionDetailLines}
         />
       ) : null}
     </Box>
@@ -1740,6 +2336,8 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
   const [input, setInput] = useState('');
   const [cursorOffset, setCursorOffset] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
+  const [panelScrollTop, setPanelScrollTop] = useState(0);
+  const [tasksResumeScope, setTasksResumeScope] = useState<TasksResumeScope>('current');
   const [unreadCount, setUnreadCount] = useState(0);
   const [activePanel, setActivePanel] = useState<OverlayPanel | 'none'>('none');
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
@@ -1748,6 +2346,7 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [escapePending, setEscapePending] = useState(false);
   const [dismissedSuggestionKey, setDismissedSuggestionKey] = useState<string | null>(null);
+  const [selectionActive, setSelectionActive] = useState(false);
   const exitingRef = useRef(false);
   const historyDraftRef = useRef('');
   const suppressHistoryResetRef = useRef(false);
@@ -1755,7 +2354,9 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
   const scrollTopRef = useRef(0);
   const transcriptMetricsRef = useRef({ totalHeight: 0, bodyRows: 0 });
   const pendingRawInputRef = useRef<string | null>(null);
+  const pendingWheelDeltaRef = useRef(0);
   const previousSuggestionsRef = useRef<SuggestionOption[]>([]);
+  const selectionRef = useRef(createScreenSelectionState());
 
   useEffect(() => {
     const handler = (nextSnapshot: ControllerSnapshot): void => {
@@ -1778,6 +2379,34 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
 
   useEffect(() => {
     const handleRawInput = (data: string): void => {
+      const mouseInput = parseRawMouseInput(data);
+      if (mouseInput.wheelUp) {
+        pendingWheelDeltaRef.current -= 3;
+        return;
+      }
+      if (mouseInput.wheelDown) {
+        pendingWheelDeltaRef.current += 3;
+        return;
+      }
+      if (typeof mouseInput.col === 'number' && typeof mouseInput.row === 'number') {
+        const point = { col: Math.max(0, mouseInput.col), row: Math.max(0, mouseInput.row) };
+        if (mouseInput.leftDown) {
+          startScreenSelection(selectionRef.current, point);
+          syncMouseSelection();
+          return;
+        }
+        if (mouseInput.leftDrag) {
+          updateScreenSelection(selectionRef.current, point);
+          syncMouseSelection();
+          return;
+        }
+        if (mouseInput.leftUp) {
+          updateScreenSelection(selectionRef.current, point);
+          finishScreenSelection(selectionRef.current);
+          syncMouseSelection();
+          return;
+        }
+      }
       pendingRawInputRef.current = data;
     };
 
@@ -1785,7 +2414,7 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
     return () => {
       internal_eventEmitter.removeListener('input', handleRawInput);
     };
-  }, [internal_eventEmitter]);
+  }, [internal_eventEmitter, syncMouseSelection]);
 
   useEffect(() => {
     startWorkspaceFileScan(snapshot.workspacePath);
@@ -1801,9 +2430,12 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
     () => filterSlashCommands(input, snapshot),
     [input, snapshot],
   );
+  const tasksResumePickerActive = activePanel === 'tasks' && tasksResumeSearch(input) !== undefined;
+  const heartbeatWorktimePickerActive =
+    activePanel === 'heartbeat' && heartbeatWorktimeSearch(input) !== undefined;
   const panelMatches = useMemo(
-    () => filterPanelCommands(activePanel, input, snapshot),
-    [activePanel, input, snapshot],
+    () => filterPanelCommands(activePanel, input, snapshot, tasksResumeScope),
+    [activePanel, input, snapshot, tasksResumeScope],
   );
   const mentionSuggestions = useMemo<SuggestionOption[]>(
     () =>
@@ -1824,15 +2456,14 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
     ? `panel:${activePanel}:${input}`
     : undefined;
   const suggestionsDismissed = Boolean(suggestionTriggerKey && dismissedSuggestionKey === suggestionTriggerKey);
-  const activeSuggestions = suggestionsDismissed
-    ? []
-    : mentionToken
+  const undisposedSuggestions = mentionToken
     ? mentionSuggestions
     : commandPaletteVisible
     ? commandMatches
     : panelSuggestionMode
     ? panelMatches
     : [];
+  const activeSuggestions = suggestionsDismissed ? [] : undisposedSuggestions;
   const suggestionPaletteVisible =
     activeSuggestions.length > 0 && (Boolean(mentionToken) || commandPaletteVisible || panelSuggestionMode);
   const panelSuggestionsVisible = panelSuggestionMode && activeSuggestions.length > 0;
@@ -1840,9 +2471,59 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
   const commandArgumentHint = !suggestionPaletteVisible
     ? commandPaletteVisible
       ? slashCommandArgumentHint(input)
-      : panelCommandArgumentHint(activePanel, input)
+      : panelCommandArgumentHint(activePanel, input, tasksResumeScope, snapshot)
     : undefined;
-  const selectedSuggestion = activeSuggestions[selectedSuggestionIndex];
+  const requestedResumeChatId =
+    activePanel === 'tasks' && tasksResumePickerActive ? tasksResumeSearch(input)?.trim() || undefined : undefined;
+  const requestedHeartbeatWorktimeValue =
+    activePanel === 'heartbeat' && heartbeatWorktimePickerActive
+      ? heartbeatWorktimeSearch(input)?.trim() || undefined
+      : undefined;
+  const preferredPanelSuggestionValue = requestedResumeChatId
+    ? `resume ${requestedResumeChatId}`
+    : requestedHeartbeatWorktimeValue
+    ? `worktime ${requestedHeartbeatWorktimeValue}`
+    : undefined;
+  const preferredPanelSuggestionIndex = findSuggestionIndexByApplyValue(activeSuggestions, preferredPanelSuggestionValue);
+  const clampedSelectedSuggestionIndex =
+    activeSuggestions.length === 0 ? 0 : Math.max(0, Math.min(selectedSuggestionIndex, activeSuggestions.length - 1));
+  const effectiveSelectedSuggestionIndex =
+    preferredPanelSuggestionIndex >= 0 ? preferredPanelSuggestionIndex : clampedSelectedSuggestionIndex;
+  const selectedSuggestion = activeSuggestions[effectiveSelectedSuggestionIndex];
+  const selectedResumeChat = useMemo(() => {
+    if (!(activePanel === 'tasks' && tasksResumePickerActive)) {
+      return undefined;
+    }
+    const exactChat = requestedResumeChatId
+      ? snapshot.archivedChats.find(chat => chat.id.toLowerCase() === requestedResumeChatId.toLowerCase())
+      : undefined;
+    if (exactChat) {
+      return exactChat;
+    }
+    const selected = activeSuggestions[effectiveSelectedSuggestionIndex];
+    const applyValue = suggestionApplyValue(selected);
+    if (!applyValue?.startsWith('resume ')) {
+      return undefined;
+    }
+    const chatId = applyValue.slice('resume '.length).trim();
+    return snapshot.archivedChats.find(chat => chat.id === chatId);
+  }, [
+    activePanel,
+    activeSuggestions,
+    effectiveSelectedSuggestionIndex,
+    requestedResumeChatId,
+    snapshot.archivedChats,
+    tasksResumePickerActive,
+  ]);
+  const panelContext = useMemo<PanelRenderContext>(
+    () => ({
+      tasksResumePickerActive,
+      tasksResumeScope,
+      selectedResumeChat,
+      heartbeatWorktimePickerActive,
+    }),
+    [heartbeatWorktimePickerActive, selectedResumeChat, tasksResumePickerActive, tasksResumeScope],
+  );
   const inlineGhostText =
     suggestionsDismissed
       ? undefined
@@ -1893,6 +2574,12 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
   }, [activeSuggestions]);
 
   useEffect(() => {
+    if (selectedSuggestionIndex !== effectiveSelectedSuggestionIndex) {
+      setSelectedSuggestionIndex(effectiveSelectedSuggestionIndex);
+    }
+  }, [effectiveSelectedSuggestionIndex, selectedSuggestionIndex]);
+
+  useEffect(() => {
     if (!mentionToken) {
       setFileSuggestions([]);
       return;
@@ -1920,14 +2607,52 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
   const suggestionOverflowRows =
     footerSuggestionsVisible && activeSuggestions.length > visibleSuggestionRows ? 1 : 0;
   const commandHintRows = !footerSuggestionsVisible && commandArgumentHint ? 1 : 0;
+  const tasksResumePanelActive = activePanel === 'tasks' && tasksResumePickerActive;
+  const heartbeatWorktimePanelActive = activePanel === 'heartbeat' && heartbeatWorktimePickerActive;
   const tallPanel =
-    activePanel === 'tools' || activePanel === 'permission' || activePanel === 'buddy';
+    activePanel === 'tools' ||
+    activePanel === 'permission' ||
+    activePanel === 'buddy' ||
+    tasksResumePanelActive ||
+    heartbeatWorktimePanelActive;
   const panelRows =
     activePanel === 'none'
       ? 0
+      : tasksResumePanelActive
+      ? Math.min(20, Math.max(13, Math.floor(rows * 0.5)))
+      : heartbeatWorktimePanelActive
+      ? Math.min(18, Math.max(12, Math.floor(rows * 0.44)))
       : tallPanel
       ? Math.min(18, Math.max(10, Math.floor(rows * 0.42)))
       : Math.min(12, Math.max(7, Math.floor(rows * 0.32)));
+  const panelReservedRows = panelSuggestionsVisible
+    ? panelQuickActionReservedRows({
+        panel: activePanel,
+        width: columns,
+        matches: activeSuggestions,
+        detailLines:
+          tasksResumePanelActive && selectedResumeChat
+            ? [
+                `Workspace: ${selectedResumeChat.workspacePath}`,
+                `Created: ${formatDateTime(selectedResumeChat.createdAt)} (${relativeTimeLabel(selectedResumeChat.createdAt)})`,
+                `Updated: ${formatDateTime(selectedResumeChat.updatedAt)} (${relativeTimeLabel(selectedResumeChat.updatedAt)})`,
+              ]
+            : undefined,
+      })
+    : 4;
+  const panelBodyRows =
+    activePanel === 'none'
+      ? 0
+      : Math.max(panelMinimumBodyRows(activePanel, panelContext), panelRows - panelReservedRows);
+  const panelLines = useMemo(
+    () =>
+      activePanel === 'none'
+        ? []
+        : panelDisplayLines(activePanel, snapshot, columns, Number.POSITIVE_INFINITY, panelContext),
+    [activePanel, columns, panelContext, snapshot],
+  );
+  const panelMaxScroll =
+    activePanel === 'none' ? 0 : Math.max(0, panelLines.length - panelBodyRows);
   const modalRows = panelRows;
   const showUnreadPill = unreadCount > 0;
   const bottomRows =
@@ -1941,11 +2666,106 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
   const atBottom = scroll.scrollTop >= scroll.maxScroll;
   const footerPills = buildFooterPills(snapshot, activePanel);
   const active = activeMission(snapshot);
-  const hintText = footerHint(snapshot, activePanel, suggestionPaletteVisible, atBottom, active, escapePending);
+  const hintText = footerHint(
+    snapshot,
+    activePanel,
+    suggestionPaletteVisible,
+    tasksResumeScope,
+    tasksResumePickerActive,
+    heartbeatWorktimePickerActive,
+    atBottom,
+    active,
+    escapePending,
+  );
+  const panelSuggestionsHint =
+    activePanel === 'tasks' && tasksResumePickerActive
+      ? tasksResumeScope === 'current'
+        ? '  Up/Down select  Enter resume  Tab show all IDs'
+        : '  Up/Down select  Enter resume  Tab current workspace only'
+      : activePanel === 'heartbeat' && heartbeatWorktimePickerActive
+      ? '  Up/Down select  Enter apply  Tab insert'
+      : undefined;
+  const panelSuggestionDetailLines =
+    activePanel === 'tasks' && tasksResumePickerActive && selectedResumeChat
+      ? [
+          `Workspace: ${selectedResumeChat.workspacePath}`,
+          `Created: ${formatDateTime(selectedResumeChat.createdAt)} (${relativeTimeLabel(selectedResumeChat.createdAt)})`,
+          `Updated: ${formatDateTime(selectedResumeChat.updatedAt)} (${relativeTimeLabel(selectedResumeChat.updatedAt)})`,
+        ]
+      : undefined;
+  const visibleScreenTextLines = useMemo(() => {
+    const lines: string[] = [];
+    lines.push(stickyPrompt ? `  ${stickyPrompt}` : '');
+    lines.push(...visibleTranscriptPlainLines(transcriptLayout, scroll, bodyRows, columns));
+    if (showUnreadPill) {
+      lines.push(` ${unreadCount} new messages `);
+    }
+    if (activePanel !== 'none') {
+      lines.push(
+        ...visiblePanelPlainLines({
+          panel: activePanel,
+          snapshot,
+          width: columns,
+          height: panelRows,
+          scrollTop: panelScrollTop,
+          panelContext,
+          panelSuggestionsVisible,
+          suggestions: activeSuggestions,
+          selectedSuggestionIndex: effectiveSelectedSuggestionIndex,
+          suggestionsHint: panelSuggestionsHint,
+          suggestionDetailLines: panelSuggestionDetailLines,
+        }),
+      );
+    }
+    lines.push('-'.repeat(Math.max(12, columns)));
+    return lines.map(line => fitLine(line, Math.max(1, columns)));
+  }, [
+    activePanel,
+    activeSuggestions,
+    bodyRows,
+    columns,
+    effectiveSelectedSuggestionIndex,
+    panelContext,
+    panelRows,
+    panelScrollTop,
+    panelSuggestionDetailLines,
+    panelSuggestionsHint,
+    panelSuggestionsVisible,
+    scroll,
+    showUnreadPill,
+    snapshot,
+    stickyPrompt,
+    transcriptLayout,
+    unreadCount,
+  ]);
 
   useEffect(() => {
     scrollTopRef.current = scroll.scrollTop;
   }, [scroll.scrollTop]);
+
+  useEffect(() => {
+    if (activePanel === 'none') {
+      if (panelScrollTop !== 0) {
+        setPanelScrollTop(0);
+      }
+      return;
+    }
+    if (panelScrollTop > panelMaxScroll) {
+      setPanelScrollTop(panelMaxScroll);
+    }
+  }, [activePanel, panelMaxScroll, panelScrollTop]);
+
+  useEffect(() => {
+    if (!tasksResumePickerActive && tasksResumeScope !== 'current') {
+      setTasksResumeScope('current');
+    }
+  }, [tasksResumePickerActive, tasksResumeScope]);
+
+  useEffect(() => {
+    if (panelScrollTop !== 0) {
+      setPanelScrollTop(0);
+    }
+  }, [activePanel, heartbeatWorktimePickerActive, tasksResumePickerActive]);
 
   useEffect(() => {
     const previous = transcriptMetricsRef.current;
@@ -1993,6 +2813,38 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
     });
   };
 
+  const scrollPanelBy = (delta: number): void => {
+    setPanelScrollTop(current => Math.max(0, Math.min(panelMaxScroll, current + delta)));
+  };
+
+  function clearMouseSelection(): void {
+    clearScreenSelection(selectionRef.current);
+    if (selectionActive) {
+      setSelectionActive(false);
+    }
+  }
+
+  function syncMouseSelection(): void {
+    setSelectionActive(hasScreenSelection(selectionRef.current));
+  }
+
+  function copyCurrentSelection(): void {
+    const text = extractSelectedText(visibleScreenTextLines, selectionRef.current);
+    if (!text) {
+      return;
+    }
+    void copyTextToClipboard(text);
+  }
+
+  const dismissSuggestionsForContentScroll = (): void => {
+    if (panelSuggestionMode) {
+      return;
+    }
+    if (suggestionTriggerKey) {
+      setDismissedSuggestionKey(suggestionTriggerKey);
+    }
+  };
+
   const submitInput = (): void => {
     const trimmed = input.trim();
     const canExecuteSelectedPanelCommand =
@@ -2000,13 +2852,44 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
       !trimmed &&
       selectedSuggestion?.kind === 'panel';
 
+    const selectedSuggestionApplyValue = suggestionApplyValue(selectedSuggestion);
+    const shouldOpenTasksResumePicker =
+      activePanel === 'tasks' &&
+      canExecuteSelectedPanelCommand &&
+      selectedSuggestionApplyValue === 'resume';
+    const shouldOpenHeartbeatWorktimePicker =
+      activePanel === 'heartbeat' &&
+      canExecuteSelectedPanelCommand &&
+      selectedSuggestionApplyValue === 'worktime';
+
     if (!trimmed && !canExecuteSelectedPanelCommand) {
       return;
     }
 
-    const selectedSuggestionApplyValue = suggestionApplyValue(selectedSuggestion);
+    if (shouldOpenTasksResumePicker) {
+      setTasksResumeScope('current');
+      updateInput('resume ', 'resume '.length);
+      return;
+    }
+
+    if (shouldOpenHeartbeatWorktimePicker) {
+      updateInput('worktime ', 'worktime '.length);
+      return;
+    }
+
+    if (activePanel === 'tasks' && tasksResumePickerActive && trimmed === 'resume' && activeSuggestions.length === 0) {
+      return;
+    }
+
     let payload = canExecuteSelectedPanelCommand ? selectedSuggestionApplyValue ?? selectedSuggestion!.value : trimmed;
     if (
+      activePanel === 'tasks' &&
+      tasksResumePickerActive &&
+      selectedSuggestion?.kind === 'panel' &&
+      selectedSuggestionApplyValue?.startsWith('resume ')
+    ) {
+      payload = selectedSuggestionApplyValue;
+    } else if (
       commandPaletteVisible &&
       selectedSuggestion?.kind !== 'file' &&
       selectedSuggestion &&
@@ -2057,6 +2940,7 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
     }
 
     if (activePanel !== 'none' && !payload.startsWith('/')) {
+      setDismissedSuggestionKey(`panel:${activePanel}:`);
       void props.controller.handlePanelInput(activePanel, payload);
       return;
     }
@@ -2338,36 +3222,107 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
     const rawInput = pendingRawInputRef.current ?? undefined;
     const extendedKey = withRawTerminalKeys(key as Record<string, boolean | undefined>, value, rawInput);
     pendingRawInputRef.current = null;
-    if ((extendedKey.ctrl && value === 'q') || (extendedKey.ctrl && value === 'c')) {
+    const pendingWheelDelta = pendingWheelDeltaRef.current;
+    pendingWheelDeltaRef.current = 0;
+    if (extendedKey.ctrl && value === 'q') {
       requestExit();
       return;
+    }
+    if (extendedKey.ctrl && value === 'c') {
+      if (selectionActive) {
+        copyCurrentSelection();
+        return;
+      }
+      requestExit();
+      return;
+    }
+    if (extendedKey.escape && selectionActive) {
+      clearMouseSelection();
+      return;
+    }
+    if (selectionActive) {
+      clearMouseSelection();
     }
     if (!input && value === '?') {
       setActivePanel('help');
       return;
     }
+    if (pendingWheelDelta !== 0) {
+      dismissSuggestionsForContentScroll();
+      if (activePanel !== 'none' && panelMaxScroll > 0) {
+        scrollPanelBy(pendingWheelDelta);
+      } else {
+        scrollBy(pendingWheelDelta);
+      }
+      return;
+    }
     if (extendedKey.wheelUp) {
-      scrollBy(-3);
+      dismissSuggestionsForContentScroll();
+      if (activePanel !== 'none' && panelMaxScroll > 0) {
+        scrollPanelBy(-3);
+      } else {
+        scrollBy(-3);
+      }
       return;
     }
     if (extendedKey.wheelDown) {
-      scrollBy(3);
+      dismissSuggestionsForContentScroll();
+      if (activePanel !== 'none' && panelMaxScroll > 0) {
+        scrollPanelBy(3);
+      } else {
+        scrollBy(3);
+      }
       return;
     }
     if (extendedKey.pageUp) {
-      scrollBy(-Math.max(3, Math.floor(bodyRows / 2)));
+      dismissSuggestionsForContentScroll();
+      if (activePanel !== 'none' && !input) {
+        scrollPanelBy(-Math.max(3, Math.floor(panelBodyRows / 2)));
+      } else {
+        scrollBy(-Math.max(3, Math.floor(bodyRows / 2)));
+      }
       return;
     }
     if (extendedKey.pageDown) {
-      scrollBy(Math.max(3, Math.floor(bodyRows / 2)));
+      dismissSuggestionsForContentScroll();
+      if (activePanel !== 'none' && !input) {
+        scrollPanelBy(Math.max(3, Math.floor(panelBodyRows / 2)));
+      } else {
+        scrollBy(Math.max(3, Math.floor(bodyRows / 2)));
+      }
       return;
     }
     if (!input && extendedKey.home) {
-      setScrollTop(0);
+      if (activePanel !== 'none') {
+        setPanelScrollTop(0);
+      } else {
+        setScrollTop(0);
+      }
       return;
     }
     if (!input && extendedKey.end) {
-      scrollToBottom();
+      if (activePanel !== 'none') {
+        setPanelScrollTop(panelMaxScroll);
+      } else {
+        scrollToBottom();
+      }
+      return;
+    }
+    if (
+      suggestionsDismissed &&
+      suggestionTriggerKey &&
+      undisposedSuggestions.length > 0 &&
+      ((extendedKey.ctrl && value === 'p') ||
+        (extendedKey.ctrl && value === 'n') ||
+        extendedKey.upArrow ||
+        extendedKey.downArrow)
+    ) {
+      setDismissedSuggestionKey(null);
+      setSelectedSuggestionIndex(
+        (extendedKey.ctrl && value === 'p') || extendedKey.upArrow
+          ? Math.max(0, undisposedSuggestions.length - 1)
+          : 0,
+      );
       return;
     }
     if (!commandPaletteVisible && activePanel === 'none' && !input && extendedKey.upArrow && scroll.maxScroll > 0) {
@@ -2390,6 +3345,10 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
       (suggestionPaletteVisible && extendedKey.downArrow && activeSuggestions.length > 0)
     ) {
       setSelectedSuggestionIndex(current => (current + 1) % activeSuggestions.length);
+      return;
+    }
+    if (extendedKey.tab && activePanel === 'tasks' && tasksResumePickerActive) {
+      setTasksResumeScope(current => (current === 'current' ? 'all' : 'current'));
       return;
     }
     if (extendedKey.tab && suggestionPaletteVisible) {
@@ -2446,9 +3405,13 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
       snapshot={snapshot}
       width={columns}
       height={panelRows}
+      scrollTop={panelScrollTop}
+      panelContext={panelContext}
       panelSuggestionsVisible={panelSuggestionsVisible}
       suggestions={activeSuggestions}
-      selectedSuggestionIndex={selectedSuggestionIndex}
+      selectedSuggestionIndex={effectiveSelectedSuggestionIndex}
+      suggestionsHint={panelSuggestionsHint}
+      suggestionDetailLines={panelSuggestionDetailLines}
     />
   ) : null;
 
@@ -2467,7 +3430,7 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
           promptLines={promptLines}
           suggestionsVisible={footerSuggestionsVisible}
           suggestions={activeSuggestions}
-          selectedSuggestionIndex={selectedSuggestionIndex}
+          selectedSuggestionIndex={effectiveSelectedSuggestionIndex}
           commandArgumentHint={commandArgumentHint}
           hintText={hintText}
           footerPills={footerPills}

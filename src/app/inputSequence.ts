@@ -2,6 +2,16 @@ import { Cursor } from './claudecode/Cursor.js';
 
 export type TerminalKeyState = Record<string, boolean | undefined>;
 
+export interface RawMouseInput {
+  wheelUp?: boolean;
+  wheelDown?: boolean;
+  leftDown?: boolean;
+  leftUp?: boolean;
+  leftDrag?: boolean;
+  col?: number;
+  row?: number;
+}
+
 const RAW_KEY_SEQUENCES = {
   upArrow: ['\u001b[A', '\u001bOA', '\u0000H', '\u00e0H'],
   downArrow: ['\u001b[B', '\u001bOB', '\u0000P', '\u00e0P'],
@@ -18,7 +28,7 @@ function rawMatches(raw: string | undefined, sequences: readonly string[]): bool
   return Boolean(raw && sequences.includes(raw));
 }
 
-function parseRawMouseWheel(rawInput: string | undefined): { wheelUp?: boolean; wheelDown?: boolean } {
+export function parseRawMouseInput(rawInput: string | undefined): RawMouseInput {
   if (!rawInput) {
     return {};
   }
@@ -27,20 +37,51 @@ function parseRawMouseWheel(rawInput: string | undefined): { wheelUp?: boolean; 
   const sgrMatch = /^\u001b\[<(\d+);(\d+);(\d+)([mM])$/u.exec(rawInput);
   if (sgrMatch) {
     const buttonCode = Number.parseInt(sgrMatch[1] ?? '', 10);
+    const col = Number.parseInt(sgrMatch[2] ?? '', 10) - 1;
+    const row = Number.parseInt(sgrMatch[3] ?? '', 10) - 1;
     if (!Number.isNaN(buttonCode) && (buttonCode & 64) === 64) {
-      return (buttonCode & 1) === 1 ? { wheelDown: true } : { wheelUp: true };
+      return (buttonCode & 1) === 1 ? { wheelDown: true, col, row } : { wheelUp: true, col, row };
+    }
+    const isRelease = (sgrMatch[4] ?? 'M') === 'm';
+    const isDrag = (buttonCode & 32) === 32;
+    const button = buttonCode & 3;
+    if (button === 0) {
+      if (isRelease) {
+        return { leftUp: true, col, row };
+      }
+      if (isDrag) {
+        return { leftDrag: true, col, row };
+      }
+      return { leftDown: true, col, row };
     }
   }
 
   // X10 mouse mode: ESC [ M Cb Cx Cy with bytes offset by 32.
   if (rawInput.startsWith('\u001b[M') && rawInput.length >= 6) {
     const buttonCode = rawInput.charCodeAt(3) - 32;
+    const col = rawInput.charCodeAt(4) - 33;
+    const row = rawInput.charCodeAt(5) - 33;
     if (!Number.isNaN(buttonCode) && (buttonCode & 64) === 64) {
-      return (buttonCode & 1) === 1 ? { wheelDown: true } : { wheelUp: true };
+      return (buttonCode & 1) === 1 ? { wheelDown: true, col, row } : { wheelUp: true, col, row };
+    }
+    const isDrag = (buttonCode & 32) === 32;
+    const button = buttonCode & 3;
+    if (button === 0) {
+      return isDrag ? { leftDrag: true, col, row } : { leftDown: true, col, row };
+    }
+    if (button === 3) {
+      return { leftUp: true, col, row };
     }
   }
 
   return {};
+}
+
+export function parseRawMouseWheel(rawInput: string | undefined): { wheelUp?: boolean; wheelDown?: boolean } {
+  const parsed = parseRawMouseInput(rawInput);
+  return parsed.wheelUp || parsed.wheelDown
+    ? { wheelUp: parsed.wheelUp, wheelDown: parsed.wheelDown }
+    : {};
 }
 
 export function withRawTerminalKeys(
@@ -60,6 +101,10 @@ export function withRawTerminalKeys(
   }
   if (!next.wheelDown && mouseWheel.wheelDown) {
     next.wheelDown = true;
+  }
+  if (mouseWheel.wheelUp || mouseWheel.wheelDown) {
+    next.upArrow = false;
+    next.downArrow = false;
   }
 
   if (!next.upArrow && rawMatches(rawInput, RAW_KEY_SEQUENCES.upArrow)) {

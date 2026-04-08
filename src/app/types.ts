@@ -23,6 +23,7 @@ export interface AssistantAppConfig {
   workspacePath: string;
   runtimeConfigPath: string;
   stateDir: string;
+  historyDir: string;
   tooling: {
     enableComputerUse: boolean;
     computerUsePrefix?: string;
@@ -92,6 +93,7 @@ export interface HeartbeatRuntimeState {
 export interface AssistantArchivedChat {
   id: string;
   title: string;
+  workspacePath: string;
   createdAt: string;
   updatedAt: string;
   archivedAt: string;
@@ -102,6 +104,7 @@ export interface AssistantArchivedChat {
 export interface AssistantChatSummary {
   id: string;
   title: string;
+  workspacePath: string;
   createdAt: string;
   updatedAt: string;
   archivedAt: string;
@@ -140,6 +143,7 @@ export interface ControllerSnapshot {
   workspacePath: string;
   runtimeConfigPath: string;
   runtimeConfigSource: RuntimeBootstrapInfo['source'];
+  historyDir: string;
   detectedModel?: string;
   permissionMode: ActoviqPermissionMode;
   permissionPreset: PermissionPreset;

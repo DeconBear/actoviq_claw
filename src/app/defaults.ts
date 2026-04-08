@@ -59,6 +59,7 @@ export function buildDefaultConfig(rootDir: string): AssistantAppConfig {
     workspacePath: rootDir,
     runtimeConfigPath: path.join(rootDir, 'actoviq-claw.runtime.settings.local.json'),
     stateDir: path.join(rootDir, '.actoviq-claw'),
+    historyDir: path.join(rootDir, '.actoviq-claw', 'history'),
     tooling: {
       enableComputerUse: true,
       computerUsePrefix: 'computer',

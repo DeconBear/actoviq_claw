@@ -2,6 +2,7 @@
   "workspacePath": ".",
   "runtimeConfigPath": "./actoviq-claw.runtime.settings.local.json",
   "stateDir": "./.actoviq-claw",
+  "historyDir": "./.actoviq-claw/history",
   "tooling": {
     "enableComputerUse": true,
     "computerUsePrefix": "computer",

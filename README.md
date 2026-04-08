@@ -8,6 +8,7 @@ It is designed for unattended task execution and keeps the UI focused on the cha
 - bottom prompt bar with slash-command and `@file` workflow
 - Claude Code-style footer suggestions for slash/file completion
 - built-in heartbeat, buddy, memory, dream, and background task support
+- per-chat history saved by chat id for later resume
 
 ## Interface
 
@@ -16,6 +17,7 @@ The default TUI now follows a much simpler layout:
 - main transcript shows only user tasks and assistant answers
 - bottom prompt is the primary interaction point
 - every launch starts a fresh chat window
+- each chat is archived under its own chat id
 - typing `/` opens command suggestions
 - typing `@` opens workspace file and path suggestions
 - suggestions stay in the prompt footer instead of taking over the screen
@@ -52,9 +54,11 @@ Legacy runtime field names are also mapped automatically.
 - type plain text: submit a mission
 - type `/`: open command suggestions
 - open a panel such as `/heartbeat`: use `Up / Down` to pick a quick action, `Enter` to apply it, or `Tab` to insert and edit it
+- in `/heartbeat`, open `worktime` first, then choose `24h` or set `hours 00:00 24:00`
 - open `/tools`: pick a tool row to toggle it, or use global actions such as `allow all`, `deny all`, and `reset`
 - `/tools` also supports category actions such as `enable category computer` or `disable category mcp`
 - open `/permission`: choose `chat-only`, `workspace-only`, or `full-access` from the panel quick actions
+- open `/status`: run `history` to show the current history path or `history-dir <path>` to move chat-history storage
 - type `@`: autocomplete files and paths from the workspace
 - `Tab`: accept the selected suggestion or extend a shared file-path prefix
 - `Ctrl+N / Ctrl+P`: cycle the current suggestion list
@@ -74,6 +78,7 @@ Legacy runtime field names are also mapped automatically.
 - built-in computer-use tools in `/tools`, registered by default but not enabled in the default allowlist
 - three permission presets with `/permission`: chat-only, workspace-only, and full-access
 - panel quick actions for tools, permissions, heartbeat, buddy, and other runtime controls
+- archived chats saved one file per chat id under `historyDir`
 
 ## Tool Catalog
 
@@ -90,6 +95,14 @@ If you want external MCP tools to appear in `/tools` too, add them under `toolin
 - dream state tracking and manual or automatic dream runs
 - background task tracking for delegated work
 - archived chat history with `/resume` restoration
+
+## Chat History
+
+- every launch opens a fresh chat window with a stable `chat_<...>` id
+- archived chats are saved individually in `historyDir`
+- use `/resume <chat-id>` directly, or open `/tasks`, press `Enter` on `resume`, and then choose a chat id
+- the `/tasks` resume picker shows current-workspace ids first; press `Tab` there to view ids from all workspaces
+- use `/status`, then run `history` or `history-dir <path>` to inspect or change the save path
 
 ## Docs
 

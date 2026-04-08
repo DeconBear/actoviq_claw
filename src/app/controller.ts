@@ -39,9 +39,11 @@ import {
   ensureDirectory,
   ensureHeartbeatTemplate,
   ensureRuntimeConfig,
+  loadArchivedChats,
   loadOrCreateAppConfig,
   loadOrCreateState,
   saveAppConfig,
+  saveArchivedChats,
   saveState,
 } from './persistence.js';
 import type {
@@ -71,7 +73,7 @@ function isValidClockValue(value: string): boolean {
   }
   const hours = Number(match[1]);
   const minutes = Number(match[2]);
-  return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59;
+  return hours >= 0 && hours <= 24 && minutes >= 0 && minutes <= 59 && (hours !== 24 || minutes === 0);
 }
 
 function trimPreview(value: string, maxLength = 180): string {
@@ -158,9 +160,15 @@ export class AutonomousAssistantController extends EventEmitter {
     this.config.autonomy.permissionMode = this.runtimePermissionMode();
     await ensureDirectory(this.config.stateDir);
     await ensureDirectory(`${this.config.stateDir}/sessions`);
+    await ensureDirectory(this.config.historyDir);
     await ensureHeartbeatTemplate(this.config.heartbeat.guideFilePath);
     this.runtimeInfo = await ensureRuntimeConfig(this.config.runtimeConfigPath);
     this.state = await loadOrCreateState(this.config.stateDir);
+    this.state.chats = this.mergeArchivedChats(
+      this.withWorkspaceFallback(this.state.chats),
+      this.withWorkspaceFallback(await loadArchivedChats(this.config.historyDir)),
+    );
+    await saveArchivedChats(this.config.historyDir, this.state.chats);
     this.startFreshChatWindow();
     await saveState(this.config.stateDir, this.state);
 
@@ -222,12 +230,67 @@ export class AutonomousAssistantController extends EventEmitter {
     return this.state.chats.map(chat => ({
       id: chat.id,
       title: titleFromChat(chat),
+      workspacePath: chat.workspacePath,
       createdAt: chat.createdAt,
       updatedAt: chat.updatedAt,
       archivedAt: chat.archivedAt,
       missionCount: chat.missions.length,
       preview: chatPreview(chat),
     }));
+  }
+
+  private withWorkspaceFallback(chats: readonly AssistantArchivedChat[]): AssistantArchivedChat[] {
+    return chats.map(chat => ({
+      ...chat,
+      workspacePath: chat.workspacePath?.trim() ? chat.workspacePath : this.config.workspacePath,
+      missions: chat.missions.map(mission => ({ ...mission })),
+      logs: chat.logs.map(entry => ({ ...entry })),
+    }));
+  }
+
+  private mergeArchivedChats(
+    left: readonly AssistantArchivedChat[],
+    right: readonly AssistantArchivedChat[],
+  ): AssistantArchivedChat[] {
+    const merged = new Map<string, AssistantArchivedChat>();
+    for (const chat of [...left, ...right]) {
+      const current = merged.get(chat.id);
+      if (!current || chat.updatedAt >= current.updatedAt) {
+        merged.set(chat.id, {
+          ...chat,
+          workspacePath: chat.workspacePath?.trim() ? chat.workspacePath : current?.workspacePath ?? '',
+          missions: chat.missions.map(mission => ({ ...mission })),
+          logs: chat.logs.map(entry => ({ ...entry })),
+        });
+      }
+    }
+    return [...merged.values()].sort((a, b) => b.archivedAt.localeCompare(a.archivedAt)).slice(0, 200);
+  }
+
+  private buildCurrentChatArchive(): AssistantArchivedChat | undefined {
+    if (this.state.missions.length === 0 && this.state.logs.length === 0) {
+      return undefined;
+    }
+
+    const latestMissionAt = this.state.missions.reduce(
+      (latest, mission) => (mission.updatedAt > latest ? mission.updatedAt : latest),
+      this.state.currentChatCreatedAt,
+    );
+    const latestLogAt = this.state.logs.reduce(
+      (latest, entry) => (entry.at > latest ? entry.at : latest),
+      latestMissionAt,
+    );
+
+    return {
+      id: this.state.currentChatId,
+      title: this.state.currentChatTitle,
+      workspacePath: this.config.workspacePath,
+      createdAt: this.state.currentChatCreatedAt,
+      updatedAt: latestLogAt,
+      archivedAt: nowIso(),
+      missions: this.state.missions.map(mission => ({ ...mission })),
+      logs: this.state.logs.map(entry => ({ ...entry })),
+    };
   }
 
   private startFreshChatWindow(): void {
@@ -244,28 +307,10 @@ export class AutonomousAssistantController extends EventEmitter {
   }
 
   private archiveCurrentChatIfNeeded(): void {
-    if (this.state.missions.length === 0 && this.state.logs.length === 0) {
+    const chat = this.buildCurrentChatArchive();
+    if (!chat) {
       return;
     }
-
-    const latestMissionAt = this.state.missions.reduce(
-      (latest, mission) => (mission.updatedAt > latest ? mission.updatedAt : latest),
-      this.state.currentChatCreatedAt,
-    );
-    const latestLogAt = this.state.logs.reduce(
-      (latest, entry) => (entry.at > latest ? entry.at : latest),
-      latestMissionAt,
-    );
-
-    const chat: AssistantArchivedChat = {
-      id: this.state.currentChatId,
-      title: this.state.currentChatTitle,
-      createdAt: this.state.currentChatCreatedAt,
-      updatedAt: latestLogAt,
-      archivedAt: nowIso(),
-      missions: this.state.missions.map(mission => ({ ...mission })),
-      logs: this.state.logs.map(entry => ({ ...entry })),
-    };
 
     this.state.chats = [chat, ...this.state.chats.filter(existing => existing.id !== chat.id)].slice(0, 50);
   }
@@ -480,6 +525,7 @@ export class AutonomousAssistantController extends EventEmitter {
       workspacePath: this.config.workspacePath,
       runtimeConfigPath: this.runtimeInfo.runtimeConfigPath,
       runtimeConfigSource: this.runtimeInfo.source,
+      historyDir: this.config.historyDir,
       detectedModel: this.runtimeInfo.detectedModel,
       permissionMode: this.runtimePermissionMode(),
       permissionPreset: this.config.autonomy.permissionPreset,
@@ -1044,10 +1090,69 @@ export class AutonomousAssistantController extends EventEmitter {
             this.log('success', 'heartbeat', `Heartbeat active hours set to ${start}-${end}.`);
             break;
           }
+          case '24h':
+          case 'all-day':
+          case 'allday':
+          case 'always': {
+            await this.updateHeartbeatSettings({ activeHours: { start: '00:00', end: '24:00' } });
+            this.log('success', 'heartbeat', 'Heartbeat active window set to all day (24h).');
+            break;
+          }
           case 'timezone': {
             const timezone = args.join(' ').trim();
             await this.updateHeartbeatSettings({ activeHours: { timezone: timezone.toLowerCase() === 'clear' ? '' : timezone } });
             this.log('success', 'heartbeat', timezone ? `Heartbeat timezone set to ${timezone}.` : 'Heartbeat timezone cleared.');
+            break;
+          }
+          case 'worktime': {
+            const mode = (args[0] ?? '').toLowerCase();
+            if (!mode) {
+              this.log('info', 'heartbeat', 'Heartbeat worktime commands: 24h | hours <start> <end> | start <HH:MM> | end <HH:MM> | timezone <name|clear>');
+              break;
+            }
+            if (mode === '24h' || mode === 'all-day' || mode === 'allday' || mode === 'always') {
+              await this.updateHeartbeatSettings({ activeHours: { start: '00:00', end: '24:00' } });
+              this.log('success', 'heartbeat', 'Heartbeat active window set to all day (24h).');
+              break;
+            }
+            if (mode === 'hours') {
+              const start = args[1] ?? '';
+              const end = args[2] ?? '';
+              if (!isValidClockValue(start) || !isValidClockValue(end)) {
+                this.log('warn', 'heartbeat', 'Usage: worktime hours <HH:MM> <HH:MM>');
+                break;
+              }
+              await this.updateHeartbeatSettings({ activeHours: { start, end } });
+              this.log('success', 'heartbeat', `Heartbeat active hours set to ${start}-${end}.`);
+              break;
+            }
+            if (mode === 'start') {
+              const start = args[1] ?? '';
+              if (!isValidClockValue(start)) {
+                this.log('warn', 'heartbeat', 'Usage: worktime start <HH:MM>');
+                break;
+              }
+              await this.updateHeartbeatSettings({ activeHours: { start } });
+              this.log('success', 'heartbeat', `Heartbeat start time set to ${start}.`);
+              break;
+            }
+            if (mode === 'end') {
+              const end = args[1] ?? '';
+              if (!isValidClockValue(end)) {
+                this.log('warn', 'heartbeat', 'Usage: worktime end <HH:MM>');
+                break;
+              }
+              await this.updateHeartbeatSettings({ activeHours: { end } });
+              this.log('success', 'heartbeat', `Heartbeat end time set to ${end}.`);
+              break;
+            }
+            if (mode === 'timezone') {
+              const timezone = args.slice(1).join(' ').trim();
+              await this.updateHeartbeatSettings({ activeHours: { timezone: timezone.toLowerCase() === 'clear' ? '' : timezone } });
+              this.log('success', 'heartbeat', timezone ? `Heartbeat timezone set to ${timezone}.` : 'Heartbeat timezone cleared.');
+              break;
+            }
+            this.log('warn', 'heartbeat', 'Usage: worktime 24h | worktime hours <HH:MM> <HH:MM> | worktime start <HH:MM> | worktime end <HH:MM> | worktime timezone <name|clear>');
             break;
           }
           case 'file':
@@ -1075,7 +1180,7 @@ export class AutonomousAssistantController extends EventEmitter {
             this.log(
               'warn',
               'heartbeat',
-              'Heartbeat panel commands: on | off | toggle | tick | every <minutes> | start <HH:MM> | end <HH:MM> | hours <start> <end> | timezone <name|clear> | file <path> | isolated <on|off>',
+              'Heartbeat panel commands: on | off | toggle | tick | every <minutes> | worktime | timezone <name|clear> | file <path> | isolated <on|off>',
             );
             break;
         }
@@ -1166,13 +1271,36 @@ export class AutonomousAssistantController extends EventEmitter {
           await this.handleSessionsCommand();
           break;
         }
+        if (action === 'history') {
+          this.log('info', 'system', `History path: ${this.config.historyDir}`);
+          break;
+        }
+        if (action === 'history-dir') {
+          const nextPath = args.join(' ').trim();
+          if (!nextPath) {
+            this.log('warn', 'system', 'Usage: history-dir <path>');
+            break;
+          }
+          const resolvedHistoryDir = path.resolve(this.config.workspacePath, nextPath);
+          await ensureDirectory(resolvedHistoryDir);
+          const mergedChats = this.mergeArchivedChats(
+            this.state.chats,
+            this.withWorkspaceFallback(await loadArchivedChats(resolvedHistoryDir)),
+          );
+          await saveArchivedChats(resolvedHistoryDir, mergedChats);
+          this.config.historyDir = resolvedHistoryDir;
+          this.state.chats = mergedChats;
+          await this.persistConfig();
+          this.log('success', 'system', `History path set to ${this.config.historyDir}.`);
+          break;
+        }
         if (action === 'newchat' || action === 'new') {
           this.startFreshChatWindow();
           this.log('success', 'system', `Opened ${this.state.currentChatTitle}.`);
           this.scheduleSave();
           break;
         }
-        this.log('warn', 'system', 'Status panel commands: pause | resume | newchat | sessions');
+        this.log('warn', 'system', 'Status panel commands: pause | resume | newchat | sessions | history | history-dir <path>');
         break;
       }
       case 'help':
@@ -1328,7 +1456,16 @@ export class AutonomousAssistantController extends EventEmitter {
       this.log('success', 'heartbeat', `Heartbeat interval set to ${Math.round(minutes)} minutes.`);
       return;
     }
-    this.log('warn', 'heartbeat', 'Usage: /heartbeat on | off | tick | every <minutes>');
+    if (action === '24h' || action === 'all-day' || action === 'allday' || action === 'always') {
+      await this.updateHeartbeatSettings({ activeHours: { start: '00:00', end: '24:00' } });
+      this.log('success', 'heartbeat', 'Heartbeat active window set to all day (24h).');
+      return;
+    }
+    if (action === 'worktime') {
+      await this.handlePanelInput('heartbeat', ['worktime', ...args.slice(1)].join(' '));
+      return;
+    }
+    this.log('warn', 'heartbeat', 'Usage: /heartbeat on | off | tick | every <minutes> | 24h | worktime ...');
   }
 
   private async handlePermissionCommand(args: string[]): Promise<void> {
@@ -1709,5 +1846,12 @@ export class AutonomousAssistantController extends EventEmitter {
 
   private async persistNow(): Promise<void> {
     await saveState(this.config.stateDir, this.state);
+    await saveArchivedChats(
+      this.config.historyDir,
+      this.mergeArchivedChats(
+        this.state.chats,
+        this.buildCurrentChatArchive() ? [this.buildCurrentChatArchive()!] : [],
+      ),
+    );
   }
 }

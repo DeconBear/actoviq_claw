@@ -4,7 +4,14 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 
 import { describe, expect, it } from 'vitest';
 
-import { loadOrCreateAppConfig, loadOrCreateState, saveAppConfig } from '../src/app/persistence.js';
+import {
+  loadArchivedChats,
+  loadOrCreateAppConfig,
+  loadOrCreateState,
+  saveAppConfig,
+  saveArchivedChats,
+} from '../src/app/persistence.js';
+import type { AssistantArchivedChat } from '../src/app/types.js';
 
 describe('loadOrCreateState', () => {
   it('migrates a version 1 state into the current chat-aware format', async () => {
@@ -85,6 +92,7 @@ describe('app config persistence', () => {
     ];
     initial.autonomy.permissionPreset = 'workspace-only';
     initial.autonomy.allowedTools = ['Read', 'Glob'];
+    initial.historyDir = path.join(rootDir, 'custom-history');
 
     await saveAppConfig(rootDir, initial);
 
@@ -112,5 +120,44 @@ describe('app config persistence', () => {
     ]);
     expect(reloaded.autonomy.permissionPreset).toBe('workspace-only');
     expect(reloaded.autonomy.allowedTools).toEqual(['Read', 'Glob']);
+    expect(reloaded.historyDir).toBe(path.join(rootDir, 'custom-history'));
+  });
+});
+
+describe('archived chat persistence', () => {
+  it('stores each archived chat as a separate json file and reloads them by id', async () => {
+    const historyDir = await mkdtemp(path.join(os.tmpdir(), 'actoviq-claw-history-'));
+    const chats: AssistantArchivedChat[] = [
+      {
+        id: 'chat_mno123_abcd01',
+        title: 'Chat 1',
+        workspacePath: 'E:/workspace/one',
+        createdAt: '2026-04-08T10:00:00.000Z',
+        archivedAt: '2026-04-08T10:10:00.000Z',
+        updatedAt: '2026-04-08T10:10:00.000Z',
+        missions: [],
+        logs: [],
+      },
+      {
+        id: 'chat_mno124_abcd02',
+        title: 'Chat 2',
+        workspacePath: 'E:/workspace/two',
+        createdAt: '2026-04-08T11:00:00.000Z',
+        archivedAt: '2026-04-08T11:10:00.000Z',
+        updatedAt: '2026-04-08T11:10:00.000Z',
+        missions: [],
+        logs: [],
+      },
+    ];
+
+    await saveArchivedChats(historyDir, chats);
+
+    const firstFile = JSON.parse(
+      await readFile(path.join(historyDir, 'chat_mno123_abcd01.json'), 'utf8'),
+    ) as { id: string };
+    expect(firstFile.id).toBe('chat_mno123_abcd01');
+
+    const reloaded = await loadArchivedChats(historyDir);
+    expect(reloaded.map(chat => chat.id)).toEqual(['chat_mno124_abcd02', 'chat_mno123_abcd01']);
   });
 });

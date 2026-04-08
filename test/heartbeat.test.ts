@@ -57,6 +57,19 @@ describe('active hours', () => {
       ),
     ).toBe(false);
   });
+
+  it('treats 00:00-24:00 as all day', () => {
+    expect(
+      isWithinActiveHours(
+        {
+          start: '00:00',
+          end: '24:00',
+          timezone: 'UTC',
+        },
+        new Date('2026-04-05T23:59:00Z'),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('computeNextHeartbeatAt', () => {
