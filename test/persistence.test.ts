@@ -71,6 +71,20 @@ describe('app config persistence', () => {
       end: '21:30',
       timezone: 'Asia/Shanghai',
     };
+    initial.tooling.enableComputerUse = true;
+    initial.tooling.computerUsePrefix = 'desktop';
+    initial.tooling.mcpServers = [
+      {
+        kind: 'stdio',
+        name: 'demo-mcp',
+        command: 'npx',
+        args: ['-y', 'demo-mcp'],
+        cwd: path.join(rootDir, 'tools'),
+        prefix: 'demo',
+      },
+    ];
+    initial.autonomy.permissionPreset = 'workspace-only';
+    initial.autonomy.allowedTools = ['Read', 'Glob'];
 
     await saveAppConfig(rootDir, initial);
 
@@ -82,5 +96,21 @@ describe('app config persistence', () => {
       end: '21:30',
       timezone: 'Asia/Shanghai',
     });
+    expect(reloaded.tooling.enableComputerUse).toBe(true);
+    expect(reloaded.tooling.computerUsePrefix).toBe('desktop');
+    expect(reloaded.tooling.mcpServers).toEqual([
+      {
+        kind: 'stdio',
+        name: 'demo-mcp',
+        command: 'npx',
+        args: ['-y', 'demo-mcp'],
+        cwd: path.join(rootDir, 'tools'),
+        prefix: 'demo',
+        env: undefined,
+        stderr: undefined,
+      },
+    ]);
+    expect(reloaded.autonomy.permissionPreset).toBe('workspace-only');
+    expect(reloaded.autonomy.allowedTools).toEqual(['Read', 'Glob']);
   });
 });

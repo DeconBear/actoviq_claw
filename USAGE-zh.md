@@ -1,24 +1,31 @@
 # Actoviq Claw 使用教程
 
-## 1. 它是什么
+## 1. 项目定位
 
-`Actoviq Claw` 是一个运行在终端中的全自动 AI 助理，基于 `actoviq-agent-sdk` 构建。
+`Actoviq Claw` 是一个运行在终端里的全自动 AI 助理，基于 `actoviq-agent-sdk` 构建。
 
-它的默认使用方式不是“单次问答”，而是“长期驻留 + 持续接任务”：
+它不是一次性的问答工具，而是一个可长期运行的自治工作台：
 
-- 你输入一句自然语言，它会把这句话当作一个 mission 放进队列
-- 队列可以自动运行，也可以暂停后手动恢复
-- 空闲时可以按 heartbeat 周期巡检
-- 任务完成后会提取 session memory
-- 合适的时候会触发 dream 做长期记忆整理
-- buddy 会作为陪伴式角色融入整个运行时
+- 你输入一条普通文本，它会把这条内容当成 mission 放进队列
+- 队列可以自动执行，也可以暂停后恢复
+- 空闲时会按 heartbeat 周期自动巡检
+- mission 完成后会提取 session memory
+- 条件满足时会运行 dream
+- buddy 会作为常驻 companion 融入 TUI
 
-## 2. 安装
+## 2. 安装与启动
 
 在当前目录执行：
 
 ```bash
 npm install
+npm run dev
+```
+
+如果你希望它操作别的工作区：
+
+```bash
+npm run dev -- --workspace E:/your/workspace
 ```
 
 ## 3. 运行时配置
@@ -27,257 +34,388 @@ npm install
 
 - `actoviq-claw.runtime.settings.local.json`
 
-可以参考：
+可参考：
 
 - [actoviq-claw.runtime.settings.example.json](./actoviq-claw.runtime.settings.example.json)
 
-最少需要准备：
+至少需要这些字段：
 
 - `ACTOVIQ_BASE_URL`
 - `ACTOVIQ_AUTH_TOKEN`
 - `ACTOVIQ_MODEL`
 
-如果你已经有旧版运行时配置，这个项目也会自动兼容映射，不需要重新改历史字段。
+旧字段名也会自动映射兼容。
 
-## 4. 启动
+另外，工具注册相关配置在：
 
-```bash
-npm run dev
-```
+- `actoviq-claw.config.json`
 
-如果你想让它操作别的工作区：
+可参考：
 
-```bash
-npm run dev -- --workspace E:/your/workspace
-```
+- [actoviq-claw.config.example.json](./actoviq-claw.config.example.json)
 
-## 5. 首次启动会做什么
+这里可以配置：
 
-首次启动时，程序会自动完成这些初始化：
+- 是否注册 computer-use 工具
+- computer-use 工具前缀
+- 额外 MCP servers
 
-1. 创建 `actoviq-claw.config.json`
-2. 创建 `HEARTBEAT.md`
-3. 创建本地状态目录 `./.actoviq-claw/`
-4. 初始化本地 session 存储 `./.actoviq-claw/sessions/`
-5. 启用 memory / compact / dream 相关运行时能力
-6. 如果还没有 buddy，就自动孵化一个默认 buddy
+## 4. 启动后界面
 
-## 6. 当前 TUI 结构
+当前 TUI 采用聊天优先的全屏布局，主要由三部分组成：
 
-现在的界面是“全屏聊天流 + 底部输入栏”的形式，重点是把注意力放回对话和任务本身，而不是一直盯着监控面板。
+- 主聊天记录区
+- 底部输入区
+- 底部状态 pills
 
-### 主聊天流
+所有功能都从输入区进入，不再放一个常驻大面板。
 
-主区域默认只显示两类内容：
+### 主聊天记录区
 
-- 你提交的任务
-- 助理返回的回答
+默认只显示两类内容：
 
-不会在主聊天流里持续刷这些过程性信息：
+- 你的输入
+- 助理的回复
 
-- 工具调用细节
-- memory 提取过程
-- dream 过程日志
-- heartbeat 内部巡检日志
+heartbeat、memory、dream、tool call 这些过程信息不会持续刷进主聊天区。
 
-这些能力仍然存在，只是被移到了 `/` 命令和下方面板里。
+### 底部输入区
 
-### 底部输入栏
+- 输入普通文本：提交一个 mission
+- 输入 `/`：打开命令入口
+- 输入 `@`：补全工作区文件和路径
+- `Shift+Enter`：换行
 
-底部只有一个输入框：
+### 底部状态 pills
 
-- 输入普通文本：提交任务
-- 输入 `/`：打开命令面板
-- 输入完整 `/命令`：直接执行控制动作
-- `Shift+Enter` 或 `Meta+Enter`：在输入框里换行
-- 当 `/` 命令存在更完整匹配时，输入框会直接显示内联补全提示
+底部会显示当前关键状态，例如：
 
-### 底部状态区
+- 当前权限预设
+- heartbeat 状态
+- dream 状态
+- buddy 状态
+- tasks 数量
+- memory 状态
+- 当前模型
 
-输入框下方会显示两行简洁状态信息：
+## 5. 快捷键
 
-- 一行交互提示，例如 `/ commands`、`Esc interrupt`、`Up/Down history`
-- 一行状态 pills，用来展示 auto / heartbeat / dream / buddy / tasks / model / memory
+- `/`：打开 slash 命令入口
+- `@`：补全工作区文件和路径
+- `Up / Down`：
+  - 输入框里有文本时，切换输入历史
+  - 建议列表打开时，移动当前选项
+  - 输入框为空且无建议时，滚动聊天记录
+- `Tab`：接受当前建议，或继续补全共同前缀
+- `Enter`：提交任务或执行当前选项
+- `Shift+Enter`：在输入框内换行
+- `Esc`：
+  - 先关闭建议列表
+  - 再关闭当前面板
+  - 输入框非空时，双击清空
+  - mission 正在运行时，可以中断当前任务
+- 鼠标滚轮 / `PageUp` / `PageDown`：滚动聊天记录
+- `Ctrl+N / Ctrl+P`：在建议列表中上下移动
+- `Ctrl+Q` / `Ctrl+C`：退出
+- `?`：打开帮助面板
 
-## 7. 快捷键
+## 6. Slash 命令入口
 
-- `/`：打开命令建议
-- `@`：补全工作区中的文件和路径
-- 建议列表会直接显示在输入区 footer，不会占满整个屏幕
-- `Up / Down`：在输入框非空时切换输入历史
-- `Tab`：接受当前建议，或把多个文件建议的公共前缀继续补全
-- `Ctrl+N / Ctrl+P`：在当前建议列表中切换
-- `Enter`：提交任务或执行命令
-- `Shift+Enter`：在输入框里换行
-- `Esc`：先收起当前建议；再按可关闭面板；输入框非空时按两次可清空；空输入时可中断当前 mission
-- `Left / Right`：面板打开时切换不同面板
-- `鼠标滚轮 / PageUp / PageDown`：滚动主聊天流
-- `Ctrl+Q`：退出
-- `Ctrl+C`：退出
-- `?`：在空输入状态下打开帮助面板
+当前可用入口有：
 
-## 8. 输入方式
+- `/help`
+- `/status`
+- `/tasks`
+- `/heartbeat`
+- `/memory`
+- `/dream`
+- `/buddy`
+- `/tools`
+- `/permission`
 
-### 8.1 普通任务
+这些命令现在主要是“进入某个功能面板”的入口，不再把所有子命令都塞进 `/` 列表里。
 
-直接输入一句自然语言即可，它会被放进 mission 队列：
+## 7. 面板通用交互
+
+进入任何一个面板后，都可以这样操作：
+
+- `Up / Down`：选择面板中的 quick actions
+- `Enter`：直接执行当前选中项
+- `Tab`：把当前选中项填进输入框，便于继续改成自定义参数
+
+例如：
+
+- 选中 `start 08:00` 后按 `Tab`，再把它改成 `start 09:30`
+- 选中 `file ./HEARTBEAT.md` 后按 `Tab`，再改成你自己的路径
+
+## 8. 常见用法
+
+### 8.1 提交普通任务
+
+直接输入自然语言即可：
 
 ```text
 检查当前仓库的发布风险，并给出一个可执行清单
 ```
 
-### 8.2 Slash 命令
+### 8.2 使用 `/heartbeat`
 
-当前常用命令包括：
+先输入：
 
-- `/help`
-- `/pause`
-- `/resume`
-- `/resume list`
-- `/resume queue`
-- `/status`
-- `/tasks`
-- `/sessions`
-- `/cancel <mission-id>`
-- `/heartbeat on`
-- `/heartbeat off`
-- `/heartbeat tick`
-- `/heartbeat every 30`
-- `/buddy`
-- `/buddy pet`
-- `/buddy mute`
-- `/buddy unmute`
-- `/buddy hatch Mochi calm and observant`
-- `/memory`
-- `/memory state`
-- `/memory find 发布流程`
-- `/dream`
-- `/dream now`
-- `/dream state`
+```text
+/heartbeat
+```
 
-其中：
+进入后可以直接选择或输入：
 
-- `/help /status /tasks /memory /dream /buddy` 会打开对应面板
-- `/pause /resume /resume list /resume queue /heartbeat ... /buddy ... /dream ... /memory find ...` 会执行动作
+- `tick`
+- `on`
+- `off`
+- `every 30`
+- `start 09:00`
+- `end 22:30`
+- `hours 09:00 22:30`
+- `timezone Asia/Shanghai`
+- `file ./HEARTBEAT.md`
+- `isolated on`
 
-## 9. 各个面板的作用
+### 8.3 使用 `/tools`
+
+先输入：
+
+```text
+/tools
+```
+
+面板里会显示：
+
+- 全局动作：`show`、`allow all`、`deny all`、`reset`
+- 分类动作：例如 `enable category computer`
+- 每个工具的一行状态
+
+你可以：
+
+- 直接选中某个工具并按 `Enter`，切换它的允许状态
+- 或按 `Tab` 把动作填进输入框后再编辑
+
+当前模型侧直接可用的工具通常包括：
+
+- `Read`
+- `Write`
+- `Edit`
+- `Glob`
+- `Grep`
+- `Task`
+- `computer_open_url`
+- `computer_focus_window`
+- `computer_type_text`
+- `computer_keypress`
+- `computer_read_clipboard`
+- `computer_write_clipboard`
+- `computer_take_screenshot`
+- `computer_wait`
+- `computer_run_workflow`
+
+说明：
+
+- file tools 和 `Task` 默认就在 allowlist 里
+- computer-use 工具默认会注册进系统，因此你能在 `/tools` 里看到它们
+- 但它们默认不在 allowlist 中，需要你自己启用
+- 如果你配置了 MCP servers，它们暴露出来的工具也会自动出现在 `/tools`
+
+### 8.4 使用 `/permission`
+
+先输入：
+
+```text
+/permission
+```
+
+可选三种权限预设：
+
+- `chat-only`
+  - 仅聊天回复，不允许模型使用工具
+- `workspace-only`
+  - 只允许工作区文件相关工具生效
+- `full-access`
+  - 所有已启用工具都可运行
+
+`/permission` 和 `/tools` 是叠加关系：
+
+- `/permission` 决定大范围模式
+- `/tools` 决定具体哪些工具在 allowlist 中
+
+最终生效的是两者的交集。
+
+### 8.5 使用 `/buddy`
+
+先输入：
+
+```text
+/buddy
+```
+
+进入后可以直接选择或输入：
+
+- `show`
+- `pet`
+- `intro`
+- `mute`
+- `unmute`
+- `rename Mochi`
+- `persona quietly observant and warm`
+- `hatch Mochi calm and observant`
+
+## 9. 各面板说明
 
 ### `/status`
 
 查看整体运行状态：
 
+- 当前 chat
 - 当前工作区
 - 当前模型
-- 权限模式
+- 当前权限模式
+- 工具生效数量
 - paused / busy / idle
-- heartbeat 周期和最近结果
-- auto run / auto memory / auto dream 状态
+- 队列与后台任务
 
 ### `/tasks`
 
-查看最近任务和后台任务：
+查看：
 
 - 最近 missions
-- 每个任务的状态、标题、工具调用数量、模型
-- background tasks 的运行情况
+- 后台任务
+- 已归档聊天
+
+### `/heartbeat`
+
+查看和配置：
+
+- 是否开启
+- 心跳间隔
+- 活跃时间窗
+- 时区
+- heartbeat guide 文件路径
+- 是否使用 isolated session
 
 ### `/memory`
 
-查看记忆状态：
+查看：
 
-- 是否开启自动 memory
-- 当前缓存到的 relevant memories
+- auto memory 状态
+- relevant memories
 - session memory 摘要
 - manifest 摘要
 
 ### `/dream`
 
-查看做梦状态：
+查看：
 
-- 是否开启
-- 是否满足运行条件
-- 当前阻塞原因
-- 距离上次整理过去多久
-- 还有多少 session 等待整理
+- 是否可运行
+- 阻塞原因
+- 距离上次 consolidation 的时间
+- 等待整理的 session
 
 ### `/buddy`
 
-查看 buddy 信息：
+查看：
 
-- 名称
-- 物种
-- 稀有度
-- 是否静音
-- 性格
-- 属性统计
+- companion 形态
+- 名字、物种、帽子、眼睛、稀有度
+- personality
+- stats
+- intro prompt
+- 最新 reaction
 
-### `/help`
+### `/tools`
 
-查看当前支持的命令和快捷键。
+查看：
 
-## 10. Heartbeat / Buddy / Memory / Dream
+- 当前注册的全部工具
+- 每个工具当前是 enabled / disabled / blocked by preset
+- 按 category 分类后的数量
+- allowlist 与最终生效数量
+
+### `/permission`
+
+查看：
+
+- 当前预设
+- 当前底层运行模式
+- 当前真正生效的工具集合
+
+## 10. Heartbeat、Buddy、Memory、Dream
 
 ### Heartbeat
 
-Heartbeat 用来让助理在无人值守时继续周期巡检：
+Heartbeat 用来让助理在无人值守时自动巡检：
 
-- 按配置周期自动执行
-- 读取当前工作区里的 [HEARTBEAT.md](./HEARTBEAT.md)
-- 如果当前有 mission 正在运行，就跳过本轮，等待下一次机会
-- 如果模型返回 `HEARTBEAT_OK`，内部会记录成功，但不会刷屏打扰主聊天流
-
-你可以直接修改 `HEARTBEAT.md` 来改变巡检策略。
+- 周期执行
+- 读取 [HEARTBEAT.md](./HEARTBEAT.md)
+- 当前 mission 忙碌时会跳过本轮
+- 返回 `HEARTBEAT_OK` 时会内部记录成功，但不打扰主聊天流
 
 ### Buddy
 
-Buddy 是 `actoviq-agent-sdk` 的 companion 能力在这个 TUI 中的落地：
+Buddy 是 `actoviq-agent-sdk` companion 能力在 TUI 里的落地：
 
-- 首次启动会自动孵化默认 buddy
-- 可以 `/buddy pet`
-- 可以 `/buddy mute` 和 `/buddy unmute`
-- 可以 `/buddy hatch <name> [personality]` 重新孵化
+- 默认会自动 hatch
+- 支持 pet / mute / unmute / rename / persona / hatch
+- 有底部 companion dock 和 reaction bubble
 
 ### Memory
 
-Memory 负责让助理在长周期运行中逐渐记住项目：
+Memory 负责长期记住项目上下文：
 
-- 每个 mission 完成后会尝试提取 session memory
-- `/memory find <query>` 可以搜索相关记忆
-- 相关 durable memory 仍由 SDK 负责管理
+- mission 完成后自动抽取 session memory
+- `/memory find <query>` 可检索相关记忆
 
 ### Dream
 
-Dream 用来做较长周期的整理和沉淀：
+Dream 用来做更长周期的整理与沉淀：
 
-- 如果开启 `autoDream`，任务结束后会按条件自动尝试运行
-- `/dream now` 可以手动触发
-- dream 的状态和阻塞原因可以在 `/dream` 面板里查看
+- `autoDream` 开启时会按条件自动尝试运行
+- 也可以通过 `/dream` 面板手动触发
 
-## 11. 数据落盘位置
+## 11. 聊天历史恢复
 
-- 本地状态：`./.actoviq-claw/state.json`
-- 本地 sessions：`./.actoviq-claw/sessions/`
-- 本地 runtime 配置：`./actoviq-claw.runtime.settings.local.json`
-- 应用配置：`./actoviq-claw.config.json`
+每次启动默认都会开启一个新的聊天窗口。
 
-更长期的 durable memory 仍由 SDK 自己管理，通常位于用户目录下的 Actoviq 数据目录。
+如果要恢复旧聊天：
 
-## 12. 推荐使用方式
-
-更适合这套工具的工作流是：
-
-1. 让它长期驻留在一个工作区
-2. 持续把你要做的事情投进 mission 队列
-3. 用 heartbeat 让它在空闲时主动巡检
-4. 用 memory 和 dream 让它逐渐熟悉你的项目
-5. 需要看内部状态时，再用 `/status /tasks /memory /dream /buddy`
-
-## 13. 常用验证命令
-
-开发阶段常用：
-
-```bash
-npm run typecheck
-npm test
-npm run build
+```text
+/resume
 ```
+
+然后可以继续：
+
+- `list`
+- `last`
+- `<chat-id>`
+
+也可以直接进入 `/tasks` 面板查看 archived chats。
+
+## 12. 心跳配置文件
+
+默认心跳说明文件是：
+
+- [HEARTBEAT.md](./HEARTBEAT.md)
+
+你可以在 `/heartbeat` 面板里通过 `file <path>` 改成自己的文件。
+
+## 13. 建议的第一次体验流程
+
+建议你第一次启动后按这个顺序试：
+
+1. 输入 `/status`
+2. 输入 `/permission`
+3. 切到 `workspace-only`
+4. 输入 `/tools`
+5. 看一下当前允许的工具
+6. 输入 `/heartbeat`
+7. 试一次 `tick`
+8. 输入一个普通任务
+9. 用 `@` 提及工作区里的文件
+
+这样最快能把整个系统摸熟。

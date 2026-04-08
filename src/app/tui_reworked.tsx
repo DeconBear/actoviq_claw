@@ -30,8 +30,9 @@ import {
   type MentionToken,
   type WorkspacePathSuggestion,
 } from './workspaceFiles.js';
+import { toolPermissionStatus } from './permissions.js';
 
-type OverlayPanel = 'help' | 'status' | 'tasks' | 'heartbeat' | 'memory' | 'dream' | 'buddy';
+type OverlayPanel = 'help' | 'status' | 'tasks' | 'heartbeat' | 'memory' | 'dream' | 'buddy' | 'tools' | 'permission';
 type TimelineTone = 'normal' | 'success' | 'warning' | 'error' | 'muted';
 type PanelTone = 'normal' | 'accent' | 'success' | 'warning' | 'error' | 'muted';
 
@@ -43,6 +44,7 @@ interface SlashCommandTemplate {
 interface PanelCommandTemplate {
   value: string;
   description: string;
+  applyValue?: string;
 }
 
 interface SuggestionOption {
@@ -50,6 +52,7 @@ interface SuggestionOption {
   value: string;
   description: string;
   kind: 'slash' | 'resume' | 'file' | 'panel';
+  applyValue?: string;
   replacement?: string;
 }
 
@@ -84,6 +87,8 @@ const SLASH_COMMANDS: SlashCommandTemplate[] = [
   { value: '/memory', description: 'open memory state and memory search tools' },
   { value: '/dream', description: 'open dream state and run controls' },
   { value: '/buddy', description: 'open buddy controls' },
+  { value: '/tools', description: 'open tool allowlist controls' },
+  { value: '/permission', description: 'open permission preset controls' },
   { value: '/close', description: 'close the current panel' },
 ];
 
@@ -462,6 +467,10 @@ function localPanelCommand(value: string): OverlayPanel | 'close' | undefined {
       return 'dream';
     case '/buddy':
       return 'buddy';
+    case '/tools':
+      return 'tools';
+    case '/permission':
+      return 'permission';
     case '/close':
       return 'close';
     default:
@@ -478,6 +487,8 @@ function followupPanel(value: string): OverlayPanel | undefined {
   if (normalized.startsWith('/buddy ')) return 'buddy';
   if (normalized.startsWith('/dream ')) return 'dream';
   if (normalized.startsWith('/memory ')) return 'memory';
+  if (normalized === '/tools' || normalized.startsWith('/tools ')) return 'tools';
+  if (normalized === '/permission' || normalized.startsWith('/permission ')) return 'permission';
   if (normalized.startsWith('/cancel ')) return 'tasks';
   return undefined;
 }
@@ -573,6 +584,13 @@ function longestCommonPrefix(values: readonly string[]): string {
   return prefix;
 }
 
+function suggestionApplyValue(option: SuggestionOption | undefined): string | undefined {
+  if (!option) {
+    return undefined;
+  }
+  return option.applyValue ?? option.value;
+}
+
 function panelCommandTemplates(panel: OverlayPanel, snapshot: ControllerSnapshot): PanelCommandTemplate[] {
   switch (panel) {
     case 'status':
@@ -640,11 +658,60 @@ function panelCommandTemplates(panel: OverlayPanel, snapshot: ControllerSnapshot
     case 'buddy':
       return [
         { value: 'pet', description: 'pet the buddy' },
+        { value: 'show', description: 'refresh the buddy card' },
+        { value: 'intro', description: 'show the buddy intro prompt' },
         { value: snapshot.buddy?.muted ? 'unmute' : 'mute', description: 'toggle buddy audio presence' },
         {
           value: `hatch ${snapshot.buddy?.buddy?.name ?? 'Mochi'} calm and observant`,
           description: 'hatch or replace the current buddy',
         },
+        {
+          value: `rename ${snapshot.buddy?.buddy?.name ?? 'Mochi'}`,
+          description: 'rename the current buddy',
+        },
+        {
+          value: `persona ${compactText(snapshot.buddy?.buddy?.personality ?? 'warm and observant', 32)}`,
+          description: 'rewrite the buddy personality',
+        },
+      ];
+    case 'tools':
+      return [
+        { value: 'show', description: 'show the current tool catalog' },
+        { value: 'allow all', description: 'enable every registered tool' },
+        { value: 'deny all', description: 'disable every registered tool' },
+        { value: 'reset', description: 'restore the default tool allowlist' },
+        ...Array.from(new Set(snapshot.availableTools.map(tool => tool.category))).map(category => ({
+          value: `${category} tools`,
+          applyValue: `enable category ${category}`,
+          description: `enable every ${category} tool in one step`,
+        })),
+        ...snapshot.availableTools.map(tool => {
+          const status = toolPermissionStatus(
+            tool.name,
+            snapshot.permissionPreset,
+            snapshot.availableTools.map(item => item.name),
+            snapshot.configuredAllowedTools,
+          );
+          const nextAction = status === 'disabled' ? `enable ${tool.name}` : `disable ${tool.name}`;
+          const statusLabel =
+            status === 'enabled'
+              ? 'enabled'
+              : status === 'blocked-by-preset'
+              ? 'blocked by preset'
+              : 'disabled';
+          return {
+            value: tool.name,
+            applyValue: nextAction,
+            description: `${statusLabel}  ${tool.category}  ${tool.description}`,
+          };
+        }),
+      ];
+    case 'permission':
+      return [
+        { value: 'chat-only', description: 'no model tools, pure chat replies only' },
+        { value: 'workspace-only', description: 'only workspace file tools are effective' },
+        { value: 'full-access', description: 'all enabled tools may run' },
+        { value: 'show', description: 'show the current permission preset' },
       ];
     case 'help':
       return [
@@ -654,6 +721,8 @@ function panelCommandTemplates(panel: OverlayPanel, snapshot: ControllerSnapshot
         { value: '/memory', description: 'open memory tools' },
         { value: '/dream', description: 'open dream controls' },
         { value: '/buddy', description: 'open buddy controls' },
+        { value: '/tools', description: 'open tool allowlist controls' },
+        { value: '/permission', description: 'open permission preset controls' },
       ];
     default:
       return [];
@@ -675,14 +744,23 @@ function filterPanelCommands(
       if (!normalized) {
         return true;
       }
-      const value = command.value.toLowerCase();
-      return value.startsWith(normalized) || value.includes(normalized);
+      const display = command.value.toLowerCase();
+      const applyValue = command.applyValue?.toLowerCase() ?? '';
+      const description = command.description.toLowerCase();
+      return (
+        display.startsWith(normalized) ||
+        display.includes(normalized) ||
+        applyValue.startsWith(normalized) ||
+        applyValue.includes(normalized) ||
+        description.includes(normalized)
+      );
     })
     .map(command => ({
       id: `${panel}:${command.value}`,
       value: command.value,
       description: command.description,
       kind: 'panel' as const,
+      applyValue: command.applyValue,
     }));
 }
 
@@ -697,6 +775,10 @@ function slashCommandArgumentHint(input: string): string | undefined {
       return 'Enter to open heartbeat controls';
     case '/buddy':
       return 'Enter to open buddy controls';
+    case '/tools':
+      return 'Enter to open tool allowlist controls';
+    case '/permission':
+      return 'Enter to open permission controls';
     case '/dream':
       return 'Enter to open dream controls';
     case '/memory':
@@ -745,6 +827,14 @@ function panelCommandArgumentHint(panel: OverlayPanel | 'none', input: string): 
       return 'find <query>';
     case 'buddy:hatch':
       return 'hatch <name> [personality]';
+    case 'buddy:rename':
+      return 'rename <name>';
+    case 'buddy:persona':
+      return 'persona <text>';
+    case 'tools:enable':
+    case 'tools:disable':
+    case 'tools:toggle':
+      return '<tool-name>';
     default:
       return undefined;
   }
@@ -766,6 +856,10 @@ function panelLabel(panel: OverlayPanel): string {
       return 'Dream';
     case 'buddy':
       return 'Buddy';
+    case 'tools':
+      return 'Tools';
+    case 'permission':
+      return 'Permission';
     default:
       return panel;
   }
@@ -777,6 +871,141 @@ function formatMissionCount(snapshot: ControllerSnapshot, status: AssistantMissi
 
 function activeMission(snapshot: ControllerSnapshot): AssistantMission | undefined {
   return snapshot.missions.find(mission => mission.id === snapshot.activeMissionId);
+}
+
+function permissionPresetShortLabel(preset: ControllerSnapshot['permissionPreset']): string {
+  switch (preset) {
+    case 'chat-only':
+      return 'chat';
+    case 'workspace-only':
+      return 'workspace';
+    case 'full-access':
+    default:
+      return 'full';
+  }
+}
+
+function buddyRarityColor(rarity: string | undefined): string {
+  switch (rarity) {
+    case 'legendary':
+      return 'yellow';
+    case 'epic':
+      return 'magenta';
+    case 'rare':
+      return 'cyan';
+    case 'uncommon':
+      return 'green';
+    default:
+      return 'gray';
+  }
+}
+
+function buddyHatGlyph(hat: string | undefined): string {
+  switch (hat) {
+    case 'crown':
+      return '^^';
+    case 'tophat':
+      return '[]';
+    case 'propeller':
+      return '-*-';
+    case 'halo':
+      return '-o-';
+    case 'wizard':
+      return '/\\\\';
+    case 'beanie':
+      return '~~~';
+    case 'tinyduck':
+      return 'vv';
+    default:
+      return '';
+  }
+}
+
+function buddyFace(species: string | undefined, eye: string | undefined): string {
+  const e = eye ?? 'o';
+  switch (species) {
+    case 'duck':
+    case 'goose':
+      return `(${e}${e})>`;
+    case 'cat':
+      return `/^${e}.${e}^\\\\`;
+    case 'robot':
+      return `[${e}:${e}]`;
+    case 'ghost':
+      return `(${e}${e})~`;
+    case 'turtle':
+      return `(${e}_${e})`;
+    case 'snail':
+      return `@(${e}${e})`;
+    case 'octopus':
+      return `(${e}${e})vvvv`;
+    case 'dragon':
+      return `<${e}${e}==`;
+    case 'penguin':
+      return `<${e}${e}>`;
+    case 'owl':
+      return `(${e}v${e})`;
+    case 'rabbit':
+      return `(${e}${e})/`;
+    default:
+      return `(${e}${e})`;
+  }
+}
+
+function BuddyDock(props: {
+  snapshot: ControllerSnapshot;
+  width: number;
+  activePanel: OverlayPanel | 'none';
+}): React.ReactNode {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!props.snapshot.buddyReactionAt) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [props.snapshot.buddyReactionAt]);
+
+  const buddy = props.snapshot.buddy?.buddy;
+  if (!buddy) {
+    return props.activePanel === 'buddy' ? (
+      <Box paddingX={2}>
+        <Text dimColor>{compactText('No buddy yet. Open /buddy and run hatch <name> [personality].', Math.max(16, props.width - 4))}</Text>
+      </Box>
+    ) : null;
+  }
+
+  const reactionFresh =
+    typeof props.snapshot.buddyReactionAt === 'number' &&
+    now - props.snapshot.buddyReactionAt < 12_000;
+  const bubbleSource =
+    (reactionFresh ? props.snapshot.buddyReactionText : undefined) ??
+    (props.activePanel === 'buddy'
+      ? props.snapshot.buddyIntroText || buddy.personality
+      : undefined);
+  const bubbleText = compactText(bubbleSource, Math.max(18, Math.min(56, props.width - 18)));
+  const hat = buddyHatGlyph(buddy.hat);
+  const face = buddyFace(buddy.species, buddy.eye);
+  const label = `${buddy.name} the ${buddy.species}`;
+  const color = buddyRarityColor(buddy.rarity);
+
+  return (
+    <Box flexDirection="column" paddingX={2} marginBottom={1}>
+      {bubbleText ? (
+        <Box justifyContent="flex-end">
+          <Text dimColor italic>{`"${bubbleText}"`}</Text>
+        </Box>
+      ) : null}
+      <Box justifyContent="flex-end">
+        <Text color={color}>{hat ? `${hat} ` : ''}{face}</Text>
+        <Text color={color} bold>{`  ${label}`}</Text>
+        <Text dimColor>{buddy.shiny ? '  shiny' : ''}</Text>
+      </Box>
+    </Box>
+  );
 }
 
 function buildFooterPills(snapshot: ControllerSnapshot, activePanel: OverlayPanel | 'none'): FooterPill[] {
@@ -803,6 +1032,17 @@ function buildFooterPills(snapshot: ControllerSnapshot, activePanel: OverlayPane
     label: snapshot.paused ? 'paused' : snapshot.autoRunEnabled ? 'auto' : 'manual',
     backgroundColor: snapshot.paused ? 'yellow' : 'green',
     color: 'black',
+  });
+  pills.push({
+    id: 'permission',
+    label: permissionPresetShortLabel(snapshot.permissionPreset),
+    backgroundColor:
+      snapshot.permissionPreset === 'full-access'
+        ? 'red'
+        : snapshot.permissionPreset === 'workspace-only'
+        ? 'yellow'
+        : 'gray',
+    color: snapshot.permissionPreset === 'chat-only' ? 'white' : 'black',
   });
   pills.push({
     id: 'heartbeat',
@@ -907,8 +1147,12 @@ function inputPlaceholder(activePanel: OverlayPanel | 'none'): string {
       return 'dream command';
     case 'buddy':
       return 'buddy command';
+    case 'tools':
+      return 'filter tools or type a tools command';
+    case 'permission':
+      return 'filter presets or type a permission command';
     case 'help':
-      return 'Open a panel with /status, /tasks, /heartbeat, /memory, /dream, or /buddy';
+      return 'Open a panel with /status, /tasks, /heartbeat, /memory, /dream, /buddy, /tools, or /permission';
     default:
       return 'Type a task, /command, or @file';
   }
@@ -937,7 +1181,7 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
         'Use @ to mention workspace files.',
       ]);
       pushSection(lines, 'help:panels', 'Panels', [
-        '/status  /tasks  /heartbeat  /memory  /dream  /buddy',
+        '/status  /tasks  /heartbeat  /memory  /dream  /buddy  /tools  /permission',
         '/close closes the current panel. /resume reopens archived chats.',
       ]);
       pushSection(lines, 'help:actions', 'Panel Commands', [
@@ -959,7 +1203,8 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
       pushSection(lines, 'status:runtime', 'Runtime', [
         `workspace: ${snapshot.workspacePath}`,
         `model: ${snapshot.detectedModel ?? 'unknown'}`,
-        `permission mode: ${snapshot.permissionMode}`,
+        `permission: ${snapshot.permissionPreset} (${snapshot.permissionMode})`,
+        `effective tools: ${snapshot.effectiveAllowedTools.length}/${snapshot.availableTools.length}`,
         `state: ${snapshot.paused ? 'paused' : snapshot.busy ? 'busy' : 'idle'}`,
       ]);
       pushSection(lines, 'status:queue', 'Queue', [
@@ -973,7 +1218,7 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
         `auto dream: ${snapshot.autoDreamEnabled ? 'on' : 'off'}`,
       ]);
       pushSection(lines, 'status:actions', 'Panel Commands', [
-        'pause  resume  newchat',
+        'pause  resume  newchat  /permission  /tools',
       ]);
       break;
     case 'tasks': {
@@ -1084,6 +1329,9 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
       const buddy = snapshot.buddy?.buddy;
       if (!buddy) {
         pushSection(lines, 'buddy:none', 'Buddy', ['No buddy has been hatched yet.']);
+        pushSection(lines, 'buddy:actions', 'Panel Commands', [
+          'show  pet  intro  mute  unmute  rename <name>  persona <text>  hatch <name> [personality]',
+        ]);
         break;
       }
 
@@ -1092,16 +1340,77 @@ function buildPanelLines(panel: OverlayPanel, snapshot: ControllerSnapshot): Pan
         .map(([name, value]) => `${name.toLowerCase()} ${value}`)
         .join('  ');
 
+      pushSection(lines, 'buddy:sprite', 'Companion', [
+        `${buddyHatGlyph(buddy.hat) ? `${buddyHatGlyph(buddy.hat)} ` : ''}${buddyFace(buddy.species, buddy.eye)}  ${buddy.name}`,
+      ]);
       pushSection(lines, 'buddy:identity', 'Buddy', [
         `name: ${buddy.name}`,
         `species: ${buddy.species}`,
+        `hat: ${buddy.hat}  eye: ${buddy.eye}`,
         `rarity: ${buddy.rarity}${buddy.shiny ? '  shiny' : ''}`,
         `muted: ${snapshot.buddy?.muted ? 'yes' : 'no'}`,
       ]);
       pushSection(lines, 'buddy:personality', 'Personality', [buddy.personality || 'No personality recorded.']);
       pushSection(lines, 'buddy:stats', 'Stats', [sortedStats || 'No stats available.']);
+      pushSection(lines, 'buddy:intro', 'Prompt Context', [
+        snapshot.buddyIntroText || 'No buddy intro available yet.',
+      ]);
+      if (snapshot.buddyReactionText) {
+        pushSection(lines, 'buddy:reaction', 'Latest Reaction', [snapshot.buddyReactionText]);
+      }
       pushSection(lines, 'buddy:actions', 'Panel Commands', [
-        'pet  mute  unmute  hatch <name> [personality]',
+        'show  pet  intro  mute  unmute  rename <name>  persona <text>  hatch <name> [personality]',
+      ]);
+      break;
+    }
+    case 'tools': {
+      const nameWidth = Math.max(8, ...snapshot.availableTools.map(tool => tool.name.length));
+      const categoryWidth = Math.max(8, ...snapshot.availableTools.map(tool => tool.category.length));
+      const categorySummary =
+        snapshot.availableTools.length === 0
+          ? ['No tool categories yet.']
+          : Array.from(new Set(snapshot.availableTools.map(tool => tool.category))).map(category => {
+              const tools = snapshot.availableTools.filter(tool => tool.category === category);
+              const configuredCount = tools.filter(tool => snapshot.configuredAllowedTools.includes(tool.name)).length;
+              const effectiveCount = tools.filter(tool => snapshot.effectiveAllowedTools.includes(tool.name)).length;
+              return `${category.padEnd(categoryWidth)} configured ${String(configuredCount).padStart(2)}/${tools.length}  effective ${String(effectiveCount).padStart(2)}/${tools.length}`;
+            });
+      pushSection(lines, 'tools:state', 'State', [
+        `configured tools: ${snapshot.configuredAllowedTools.length}/${snapshot.availableTools.length}`,
+        `effective tools: ${snapshot.effectiveAllowedTools.length}/${snapshot.availableTools.length}`,
+        `permission preset: ${snapshot.permissionPreset}`,
+      ]);
+      pushSection(lines, 'tools:categories', 'Categories', categorySummary);
+      const toolLines =
+        snapshot.availableTools.length === 0
+          ? ['No tools are registered.']
+          : snapshot.availableTools.map(tool => {
+              const enabled = snapshot.effectiveAllowedTools.includes(tool.name);
+              const configured = snapshot.configuredAllowedTools.includes(tool.name);
+              const status = enabled ? 'enabled' : configured ? 'blocked-by-preset' : 'disabled';
+              return `${tool.name.padEnd(nameWidth)} ${status.padEnd(17)} ${tool.category.padEnd(categoryWidth)} ${tool.description}`;
+            });
+      pushSection(lines, 'tools:list', 'Tools', toolLines);
+      pushSection(lines, 'tools:actions', 'Panel Commands', [
+        'Use the quick action list below to toggle individual tools.',
+        'Global actions: show  allow all  deny all  reset  enable category <name>  disable category <name>',
+      ]);
+      break;
+    }
+    case 'permission': {
+      pushSection(lines, 'permission:state', 'Current', [
+        `preset: ${snapshot.permissionPreset}`,
+        `runtime mode: ${snapshot.permissionMode}`,
+        `effective tools: ${snapshot.effectiveAllowedTools.join(', ') || 'none'}`,
+      ]);
+      pushSection(lines, 'permission:options', 'Presets', [
+        `chat-only      no model tools, plain chat replies only${snapshot.permissionPreset === 'chat-only' ? '  active' : ''}`,
+        `workspace-only only workspace file tools are effective${snapshot.permissionPreset === 'workspace-only' ? '  active' : ''}`,
+        `full-access    all enabled tools may run${snapshot.permissionPreset === 'full-access' ? '  active' : ''}`,
+      ]);
+      pushSection(lines, 'permission:actions', 'Panel Commands', [
+        'Use the quick action list below to switch presets.',
+        'Optional commands: chat-only  workspace-only  full-access  show',
       ]);
       break;
     }
@@ -1252,6 +1561,82 @@ function FooterSuggestions(props: {
   );
 }
 
+function PanelQuickActions(props: {
+  panel: OverlayPanel;
+  snapshot: ControllerSnapshot;
+  matches: SuggestionOption[];
+  selectedIndex: number;
+  width: number;
+}): React.ReactNode {
+  const { items: visibleMatches, start } = paletteWindow(props.matches, props.selectedIndex, 7);
+  const selectedId = props.matches[props.selectedIndex]?.id;
+
+  if (visibleMatches.length === 0) {
+    return null;
+  }
+
+  const rows = visibleMatches.map(option => {
+    const selected = option.id === selectedId;
+    let label = option.value;
+    let detail = option.description;
+    let accent: string | undefined = selected ? 'cyan' : undefined;
+    let dim = !selected;
+
+    if (props.panel === 'permission') {
+      const active = (option.applyValue ?? option.value) === props.snapshot.permissionPreset;
+      label = active ? `${option.value}  active` : option.value;
+      accent = active ? 'green' : accent;
+      dim = !(selected || active);
+    }
+
+    if (props.panel === 'tools') {
+      const toolName = option.value.trim();
+      const tool = props.snapshot.availableTools.find(item => item.name === toolName);
+      const effective = props.snapshot.effectiveAllowedTools.includes(toolName);
+      const configured = props.snapshot.configuredAllowedTools.includes(toolName);
+      if (tool) {
+        const badge = effective ? '[x]' : configured ? '[!]' : '[ ]';
+        label = `${badge} ${toolName}`;
+        accent = effective ? 'green' : configured ? 'yellow' : accent;
+        dim = !(selected || effective || configured);
+        detail = `${option.description}  Enter: ${option.applyValue ?? option.value}`;
+      }
+    }
+
+    return (
+      <Box key={option.id} paddingX={2}>
+        <Text color={accent} backgroundColor={selected ? 'cyan' : undefined} dimColor={selected ? false : dim} bold={selected}>
+          {selected ? '>' : ' '}
+        </Text>
+        <Text
+          color={selected ? 'black' : accent}
+          backgroundColor={selected ? 'cyan' : undefined}
+          dimColor={selected ? false : dim}
+          bold={selected}
+        >
+          {` ${compactText(label, Math.max(18, Math.floor(props.width * 0.45)))}`}
+        </Text>
+        <Text dimColor={!selected}>{`  ${compactText(detail, Math.max(16, props.width - 22))}`}</Text>
+      </Box>
+    );
+  });
+
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box paddingX={2}>
+        <Text color="cyan" bold>Quick Actions</Text>
+        <Text dimColor>{`  Up/Down select  Enter apply  Tab insert`}</Text>
+      </Box>
+      {rows}
+      {props.matches.length > visibleMatches.length ? (
+        <Box paddingX={2}>
+          <Text dimColor>{`Showing ${start + 1}-${start + visibleMatches.length} of ${props.matches.length}`}</Text>
+        </Box>
+      ) : null}
+    </Box>
+  );
+}
+
 function ArgumentHintRow(props: { text: string; width: number }): React.ReactNode {
   return (
     <Box paddingX={2}>
@@ -1260,8 +1645,22 @@ function ArgumentHintRow(props: { text: string; width: number }): React.ReactNod
   );
 }
 
-function PanelView(props: { panel: OverlayPanel; snapshot: ControllerSnapshot; width: number; height: number }): React.ReactNode {
-  const bodyLines = panelDisplayLines(props.panel, props.snapshot, props.width, Math.max(3, props.height - 4));
+function PanelView(props: {
+  panel: OverlayPanel;
+  snapshot: ControllerSnapshot;
+  width: number;
+  height: number;
+  panelSuggestionsVisible: boolean;
+  suggestions: SuggestionOption[];
+  selectedSuggestionIndex: number;
+}): React.ReactNode {
+  const reservedRows = props.panelSuggestionsVisible ? 11 : 4;
+  const bodyLines = panelDisplayLines(
+    props.panel,
+    props.snapshot,
+    props.width,
+    Math.max(3, props.height - reservedRows),
+  );
 
   return (
     <Box flexDirection="column" paddingTop={1}>
@@ -1275,11 +1674,22 @@ function PanelView(props: { panel: OverlayPanel; snapshot: ControllerSnapshot; w
           </Text>
         ))}
       </Box>
+      {props.panelSuggestionsVisible ? (
+        <PanelQuickActions
+          panel={props.panel}
+          snapshot={props.snapshot}
+          matches={props.suggestions}
+          selectedIndex={props.selectedSuggestionIndex}
+          width={props.width}
+        />
+      ) : null}
     </Box>
   );
 }
 
 function BottomPane(props: {
+  snapshot: ControllerSnapshot;
+  activePanel: OverlayPanel | 'none';
   promptLines: string[];
   suggestionsVisible: boolean;
   suggestions: SuggestionOption[];
@@ -1291,6 +1701,7 @@ function BottomPane(props: {
 }): React.ReactNode {
   return (
     <Box flexDirection="column">
+      <BuddyDock snapshot={props.snapshot} width={props.width} activePanel={props.activePanel} />
       <Box paddingX={2} flexDirection="column">
         {props.promptLines.map((line, index) => (
           <Box key={`prompt:${index}`}>
@@ -1424,6 +1835,8 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
     : [];
   const suggestionPaletteVisible =
     activeSuggestions.length > 0 && (Boolean(mentionToken) || commandPaletteVisible || panelSuggestionMode);
+  const panelSuggestionsVisible = panelSuggestionMode && activeSuggestions.length > 0;
+  const footerSuggestionsVisible = suggestionPaletteVisible && !panelSuggestionsVisible;
   const commandArgumentHint = !suggestionPaletteVisible
     ? commandPaletteVisible
       ? slashCommandArgumentHint(input)
@@ -1439,12 +1852,13 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
         : undefined
       : commandPaletteVisible &&
           selectedSuggestion &&
-          selectedSuggestion.value.toLowerCase().startsWith(input.toLowerCase())
-        ? selectedSuggestion.value.slice(input.length)
+          suggestionApplyValue(selectedSuggestion)?.toLowerCase().startsWith(input.toLowerCase())
+        ? suggestionApplyValue(selectedSuggestion)!.slice(input.length)
         : panelSuggestionMode &&
             selectedSuggestion &&
-            selectedSuggestion.value.toLowerCase().startsWith(input.toLowerCase())
-          ? selectedSuggestion.value.slice(input.length)
+            input.trim() &&
+            suggestionApplyValue(selectedSuggestion)?.toLowerCase().startsWith(input.toLowerCase())
+          ? suggestionApplyValue(selectedSuggestion)!.slice(input.length)
         : undefined;
   const editorColumns = Math.max(12, columns - 6);
   const promptLines = useMemo(
@@ -1502,11 +1916,18 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
     };
   }, [mentionToken, snapshot.workspacePath]);
 
-  const visibleSuggestionRows = suggestionPaletteVisible ? Math.max(1, Math.min(5, activeSuggestions.length || 1)) : 0;
+  const visibleSuggestionRows = footerSuggestionsVisible ? Math.max(1, Math.min(5, activeSuggestions.length || 1)) : 0;
   const suggestionOverflowRows =
-    suggestionPaletteVisible && activeSuggestions.length > visibleSuggestionRows ? 1 : 0;
-  const commandHintRows = !suggestionPaletteVisible && commandArgumentHint ? 1 : 0;
-  const panelRows = activePanel === 'none' ? 0 : Math.min(12, Math.max(7, Math.floor(rows * 0.32)));
+    footerSuggestionsVisible && activeSuggestions.length > visibleSuggestionRows ? 1 : 0;
+  const commandHintRows = !footerSuggestionsVisible && commandArgumentHint ? 1 : 0;
+  const tallPanel =
+    activePanel === 'tools' || activePanel === 'permission' || activePanel === 'buddy';
+  const panelRows =
+    activePanel === 'none'
+      ? 0
+      : tallPanel
+      ? Math.min(18, Math.max(10, Math.floor(rows * 0.42)))
+      : Math.min(12, Math.max(7, Math.floor(rows * 0.32)));
   const modalRows = panelRows;
   const showUnreadPill = unreadCount > 0;
   const bottomRows =
@@ -1583,14 +2004,15 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
       return;
     }
 
-    let payload = canExecuteSelectedPanelCommand ? selectedSuggestion!.value : trimmed;
+    const selectedSuggestionApplyValue = suggestionApplyValue(selectedSuggestion);
+    let payload = canExecuteSelectedPanelCommand ? selectedSuggestionApplyValue ?? selectedSuggestion!.value : trimmed;
     if (
       commandPaletteVisible &&
       selectedSuggestion?.kind !== 'file' &&
       selectedSuggestion &&
-      selectedSuggestion.value.toLowerCase().startsWith(trimmed.toLowerCase())
+      selectedSuggestionApplyValue?.toLowerCase().startsWith(trimmed.toLowerCase())
     ) {
-      payload = selectedSuggestion.value;
+      payload = selectedSuggestionApplyValue!;
     } else if (
       mentionToken &&
       selectedSuggestion?.kind === 'file' &&
@@ -1610,9 +2032,9 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
       (commandPaletteVisible || panelSuggestionMode) &&
       selectedSuggestion?.kind !== 'file' &&
       selectedSuggestion &&
-      selectedSuggestion.value.toLowerCase().startsWith(trimmed.toLowerCase())
+      selectedSuggestionApplyValue?.toLowerCase().startsWith(trimmed.toLowerCase())
     ) {
-      payload = selectedSuggestion.value;
+      payload = selectedSuggestionApplyValue!;
     }
 
     setInput('');
@@ -1907,7 +2329,8 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
       return true;
     }
 
-    updateInput(selectedSuggestion.value, selectedSuggestion.value.length);
+    const nextValue = suggestionApplyValue(selectedSuggestion) ?? selectedSuggestion.value;
+    updateInput(nextValue, nextValue.length);
     return true;
   };
 
@@ -2018,7 +2441,15 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
   });
 
   const modal = activePanel !== 'none' ? (
-    <PanelView panel={activePanel} snapshot={snapshot} width={columns} height={panelRows} />
+    <PanelView
+      panel={activePanel}
+      snapshot={snapshot}
+      width={columns}
+      height={panelRows}
+      panelSuggestionsVisible={panelSuggestionsVisible}
+      suggestions={activeSuggestions}
+      selectedSuggestionIndex={selectedSuggestionIndex}
+    />
   ) : null;
 
   return (
@@ -2031,8 +2462,10 @@ function ActoviqClawInkApp(props: { controller: AutonomousAssistantController })
       modal={modal}
       bottom={
         <BottomPane
+          snapshot={snapshot}
+          activePanel={activePanel}
           promptLines={promptLines}
-          suggestionsVisible={suggestionPaletteVisible}
+          suggestionsVisible={footerSuggestionsVisible}
           suggestions={activeSuggestions}
           selectedSuggestionIndex={selectedSuggestionIndex}
           commandArgumentHint={commandArgumentHint}

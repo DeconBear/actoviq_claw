@@ -2,10 +2,13 @@ import path from 'node:path';
 
 import {
   createActoviqFileTools,
+  type AgentMcpServerDefinition,
   type ActoviqAgentDefinition,
   type AgentToolDefinition,
+  type CreateActoviqComputerUseOptions,
 } from 'actoviq-agent-sdk';
 
+import { defaultAllowedTools } from './permissions.js';
 import type { AssistantAppConfig } from './types.js';
 
 export const DEFAULT_HEARTBEAT_PROMPT =
@@ -24,6 +27,7 @@ export const DEFAULT_SYSTEM_PROMPT = `You are Actoviq Claw, a fully autonomous t
 Finish the user's task end to end whenever it is feasible. Prefer doing the work over proposing.
 Use tools aggressively but responsibly. Keep progress visible in short status updates when you are mid-task.
 You can inspect and modify the workspace directly with file tools such as Read, Glob, Grep, Edit, and Write.
+If computer-use tools are available, you may drive the local desktop with tools like open_url, focus_window, type_text, keypress, clipboard access, screenshots, and wait.
 When a subproblem is focused and benefits from specialization, delegate with the Task tool to one of the named agents: planner, researcher, implementer, reviewer.
 Treat durable memory as future-facing context. Preserve stable facts and collaboration preferences. Use session memory to stay oriented during long tasks.
 Heartbeat turns are operational check-ins. Follow HEARTBEAT.md if it exists. If nothing needs attention, respond with HEARTBEAT_OK.
@@ -35,11 +39,31 @@ export function buildDefaultTools(workspacePath: string): AgentToolDefinition[] 
   });
 }
 
+export function buildDefaultComputerUseOptions(
+  config: AssistantAppConfig,
+): false | CreateActoviqComputerUseOptions {
+  if (!config.tooling.enableComputerUse) {
+    return false;
+  }
+
+  const prefix = config.tooling.computerUsePrefix?.trim();
+  return prefix ? { prefix } : {};
+}
+
+export function buildDefaultMcpServers(config: AssistantAppConfig): AgentMcpServerDefinition[] {
+  return config.tooling.mcpServers.map(server => ({ ...server }));
+}
+
 export function buildDefaultConfig(rootDir: string): AssistantAppConfig {
   return {
     workspacePath: rootDir,
     runtimeConfigPath: path.join(rootDir, 'actoviq-claw.runtime.settings.local.json'),
     stateDir: path.join(rootDir, '.actoviq-claw'),
+    tooling: {
+      enableComputerUse: true,
+      computerUsePrefix: 'computer',
+      mcpServers: [],
+    },
     heartbeat: {
       enabled: true,
       guideFilePath: path.join(rootDir, 'HEARTBEAT.md'),
@@ -57,6 +81,8 @@ export function buildDefaultConfig(rootDir: string): AssistantAppConfig {
       autoExtractMemory: true,
       autoDream: true,
       permissionMode: 'bypassPermissions',
+      permissionPreset: 'full-access',
+      allowedTools: defaultAllowedTools(),
     },
     buddy: {
       autoHatch: true,

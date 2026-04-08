@@ -8,6 +8,7 @@ import {
 } from 'actoviq-agent-sdk';
 
 import { buildDefaultConfig, DEFAULT_HEARTBEAT_TEMPLATE } from './defaults.js';
+import { defaultAllowedTools, normalizePermissionPreset } from './permissions.js';
 import type {
   AssistantAppConfig,
   AssistantArchivedChat,
@@ -41,6 +42,75 @@ function defaultChatTitle(createdAt: string): string {
 
 function asArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function stringRecord(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const entries: Array<[string, string]> = Object.entries(value).flatMap(
+    ([key, entryValue]) =>
+      key.trim().length > 0 && typeof entryValue === 'string'
+        ? [[key, entryValue]]
+        : [],
+  );
+  return entries.length > 0 ? Object.fromEntries(entries) as Record<string, string> : undefined;
+}
+
+function normalizeMcpServers(value: unknown, workspacePath: string): AssistantAppConfig['tooling']['mcpServers'] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const servers: AssistantAppConfig['tooling']['mcpServers'] = [];
+
+  for (const server of value) {
+    if (!isRecord(server) || typeof server.kind !== 'string' || typeof server.name !== 'string') {
+      continue;
+    }
+
+    const prefix =
+      typeof server.prefix === 'string' && server.prefix.trim() ? server.prefix.trim() : undefined;
+
+    if (server.kind === 'stdio' && typeof server.command === 'string' && server.command.trim()) {
+      servers.push({
+        kind: 'stdio',
+        name: server.name.trim(),
+        command: server.command,
+        args: Array.isArray(server.args)
+          ? server.args.filter((entry): entry is string => typeof entry === 'string')
+          : undefined,
+        env: stringRecord(server.env),
+        cwd:
+          typeof server.cwd === 'string' && server.cwd.trim()
+            ? path.resolve(workspacePath, server.cwd)
+            : undefined,
+        prefix,
+        stderr:
+          server.stderr === 'inherit' || server.stderr === 'ignore' || server.stderr === 'pipe'
+            ? server.stderr
+            : undefined,
+      });
+      continue;
+    }
+
+    if (server.kind === 'streamable_http' && typeof server.url === 'string' && server.url.trim()) {
+      servers.push({
+        kind: 'streamable_http',
+        name: server.name.trim(),
+        url: server.url,
+        headers: stringRecord(server.headers),
+        sessionId:
+          typeof server.sessionId === 'string' && server.sessionId.trim()
+            ? server.sessionId.trim()
+            : undefined,
+        prefix,
+      });
+    }
+  }
+
+  return servers;
 }
 
 function normalizeChats(value: unknown): AssistantArchivedChat[] {
@@ -189,12 +259,21 @@ function mergeConfig(defaults: AssistantAppConfig, raw: unknown): AssistantAppCo
   const heartbeat = isRecord(raw.heartbeat) ? raw.heartbeat : {};
   const autonomy = isRecord(raw.autonomy) ? raw.autonomy : {};
   const buddy = isRecord(raw.buddy) ? raw.buddy : {};
+  const tooling = isRecord(raw.tooling) ? raw.tooling : {};
+  const workspacePath =
+    typeof raw.workspacePath === 'string' && raw.workspacePath.trim()
+      ? path.resolve(raw.workspacePath)
+      : defaults.workspacePath;
+  const legacyPermissionPreset =
+    autonomy.permissionMode === 'acceptEdits'
+      ? 'workspace-only'
+      : autonomy.permissionMode === 'plan'
+      ? 'chat-only'
+      : defaults.autonomy.permissionPreset;
 
   return {
     workspacePath:
-      typeof raw.workspacePath === 'string' && raw.workspacePath.trim()
-        ? path.resolve(raw.workspacePath)
-        : defaults.workspacePath,
+      workspacePath,
     runtimeConfigPath:
       typeof raw.runtimeConfigPath === 'string' && raw.runtimeConfigPath.trim()
         ? path.resolve(raw.runtimeConfigPath)
@@ -203,15 +282,25 @@ function mergeConfig(defaults: AssistantAppConfig, raw: unknown): AssistantAppCo
       typeof raw.stateDir === 'string' && raw.stateDir.trim()
         ? path.resolve(raw.stateDir)
         : defaults.stateDir,
+    tooling: {
+      enableComputerUse:
+        typeof tooling.enableComputerUse === 'boolean'
+          ? tooling.enableComputerUse
+          : defaults.tooling.enableComputerUse,
+      computerUsePrefix:
+        typeof tooling.computerUsePrefix === 'string' && tooling.computerUsePrefix.trim()
+          ? tooling.computerUsePrefix.trim()
+          : defaults.tooling.computerUsePrefix,
+      mcpServers:
+        normalizeMcpServers(tooling.mcpServers, workspacePath) ?? defaults.tooling.mcpServers,
+    },
     heartbeat: {
       enabled:
         typeof heartbeat.enabled === 'boolean' ? heartbeat.enabled : defaults.heartbeat.enabled,
       guideFilePath:
         typeof heartbeat.guideFilePath === 'string' && heartbeat.guideFilePath.trim()
           ? path.resolve(
-              typeof raw.workspacePath === 'string' && raw.workspacePath.trim()
-                ? path.resolve(raw.workspacePath)
-                : defaults.workspacePath,
+              workspacePath,
               heartbeat.guideFilePath,
             )
           : defaults.heartbeat.guideFilePath,
@@ -267,6 +356,16 @@ function mergeConfig(defaults: AssistantAppConfig, raw: unknown): AssistantAppCo
         autonomy.permissionMode === 'auto'
           ? autonomy.permissionMode
           : defaults.autonomy.permissionMode,
+      permissionPreset: normalizePermissionPreset(
+        typeof autonomy.permissionPreset === 'string' ? autonomy.permissionPreset : undefined,
+        legacyPermissionPreset,
+      ),
+      allowedTools:
+        Array.isArray(autonomy.allowedTools)
+          ? autonomy.allowedTools.filter(
+              (value): value is string => typeof value === 'string' && value.trim().length > 0,
+            )
+          : defaults.autonomy.allowedTools ?? defaultAllowedTools(),
     },
     buddy: {
       autoHatch:

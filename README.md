@@ -30,6 +30,8 @@ The available built-in panels are:
 - `/memory`
 - `/dream`
 - `/buddy`
+- `/tools`
+- `/permission`
 
 ## Quick Start
 
@@ -49,7 +51,10 @@ Legacy runtime field names are also mapped automatically.
 
 - type plain text: submit a mission
 - type `/`: open command suggestions
-- open a panel such as `/heartbeat`: then use plain panel commands like `tick`, `on`, `every 20`, or `file ./HEARTBEAT.md`
+- open a panel such as `/heartbeat`: use `Up / Down` to pick a quick action, `Enter` to apply it, or `Tab` to insert and edit it
+- open `/tools`: pick a tool row to toggle it, or use global actions such as `allow all`, `deny all`, and `reset`
+- `/tools` also supports category actions such as `enable category computer` or `disable category mcp`
+- open `/permission`: choose `chat-only`, `workspace-only`, or `full-access` from the panel quick actions
 - type `@`: autocomplete files and paths from the workspace
 - `Tab`: accept the selected suggestion or extend a shared file-path prefix
 - `Ctrl+N / Ctrl+P`: cycle the current suggestion list
@@ -64,7 +69,23 @@ Legacy runtime field names are also mapped automatically.
 
 - autonomous mission queue
 - heartbeat-driven unattended checks with configurable schedule, active hours, isolated-session mode, and guide-file path
-- buddy hatch, mute, unmute, and pet controls
+- buddy companion card, intro text, reaction bubble, hatch, rename, persona, mute, unmute, and pet controls
+- persistent tool allowlist with `/tools`
+- built-in computer-use tools in `/tools`, registered by default but not enabled in the default allowlist
+- three permission presets with `/permission`: chat-only, workspace-only, and full-access
+- panel quick actions for tools, permissions, heartbeat, buddy, and other runtime controls
+
+## Tool Catalog
+
+By default, `/tools` now exposes more than the original file-tool set:
+
+- file tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`
+- task delegation: `Task`
+- computer-use tools: `computer_open_url`, `computer_focus_window`, `computer_type_text`, `computer_keypress`, `computer_read_clipboard`, `computer_write_clipboard`, `computer_take_screenshot`, `computer_wait`, `computer_run_workflow`
+
+Computer-use tools are registered by default so they appear in `/tools`, but they are not included in the default allowlist until you enable them.
+
+If you want external MCP tools to appear in `/tools` too, add them under `tooling.mcpServers` in [actoviq-claw.config.example.json](./actoviq-claw.config.example.json).
 - automatic session memory extraction and memory search
 - dream state tracking and manual or automatic dream runs
 - background task tracking for delegated work

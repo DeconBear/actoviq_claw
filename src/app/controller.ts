@@ -5,19 +5,36 @@ import {
   type ActoviqAgentClient,
   type ActoviqBackgroundTaskRecord,
   type ActoviqBuddyState,
+  type ActoviqCleanToolMetadata,
   type ActoviqDreamState,
+  type ActoviqPermissionRule,
   type AgentEvent,
   type AgentSession,
   createAgentSdk,
 } from 'actoviq-agent-sdk';
 
-import { buildDefaultTools, buildNamedAgents, DEFAULT_SYSTEM_PROMPT } from './defaults.js';
+import {
+  buildDefaultComputerUseOptions,
+  buildDefaultMcpServers,
+  buildDefaultTools,
+  buildNamedAgents,
+  DEFAULT_SYSTEM_PROMPT,
+} from './defaults.js';
 import { parseCommand, tokenizeCommand } from './commandParser.js';
 import {
   computeNextHeartbeatAt,
   isWithinActiveHours,
   normalizeHeartbeatResponse,
 } from './heartbeat.js';
+import {
+  buildPermissionRules,
+  canonicalizeAllowedTools,
+  computeEffectiveAllowedTools,
+  defaultAllowedTools,
+  normalizePermissionPreset,
+  permissionPresetLabel,
+  permissionPresetToMode,
+} from './permissions.js';
 import {
   ensureDirectory,
   ensureHeartbeatTemplate,
@@ -121,8 +138,12 @@ export class AutonomousAssistantController extends EventEmitter {
     sessionMemoryPreview: '',
     relevantMemories: [],
   };
+  private toolMetadata: ActoviqCleanToolMetadata[] = [];
   private backgroundTasks: ActoviqBackgroundTaskRecord[] = [];
   private backgroundStatusIndex = new Map<string, string>();
+  private buddyReactionText?: string;
+  private buddyReactionAt?: number;
+  private buddyIntroText?: string;
 
   constructor(private readonly rootDir: string) {
     super();
@@ -130,6 +151,11 @@ export class AutonomousAssistantController extends EventEmitter {
 
   async initialize(): Promise<void> {
     this.config = await loadOrCreateAppConfig(this.rootDir);
+    this.config.autonomy.permissionPreset = normalizePermissionPreset(
+      this.config.autonomy.permissionPreset,
+      'full-access',
+    );
+    this.config.autonomy.permissionMode = this.runtimePermissionMode();
     await ensureDirectory(this.config.stateDir);
     await ensureDirectory(`${this.config.stateDir}/sessions`);
     await ensureHeartbeatTemplate(this.config.heartbeat.guideFilePath);
@@ -143,10 +169,13 @@ export class AutonomousAssistantController extends EventEmitter {
       sessionDirectory: `${this.config.stateDir}/sessions`,
       systemPrompt: DEFAULT_SYSTEM_PROMPT,
       tools: buildDefaultTools(this.config.workspacePath),
-      permissionMode: this.config.autonomy.permissionMode,
+      mcpServers: buildDefaultMcpServers(this.config),
+      computerUse: buildDefaultComputerUseOptions(this.config),
+      permissionMode: this.runtimePermissionMode(),
       agents: buildNamedAgents(),
     });
 
+    await this.refreshToolCatalog();
     await this.sdk.memory.updateSettings({
       autoCompactEnabled: true,
       autoMemoryEnabled: true,
@@ -337,13 +366,126 @@ export class AutonomousAssistantController extends EventEmitter {
     }
   }
 
+  private availableToolNames(): string[] {
+    if (this.toolMetadata.length > 0) {
+      return this.toolMetadata.map(tool => tool.name);
+    }
+    return defaultAllowedTools();
+  }
+
+  private configuredAllowedToolNames(): string[] {
+    const available = this.availableToolNames();
+    return canonicalizeAllowedTools(available, this.config.autonomy.allowedTools);
+  }
+
+  private effectiveAllowedToolNames(): string[] {
+    const available = this.availableToolNames();
+    return computeEffectiveAllowedTools(
+      this.config.autonomy.permissionPreset,
+      available,
+      this.config.autonomy.allowedTools,
+    );
+  }
+
+  private runtimePermissionMode() {
+    return permissionPresetToMode(this.config.autonomy.permissionPreset);
+  }
+
+  private runtimePermissionRules(): ActoviqPermissionRule[] {
+    return buildPermissionRules(this.availableToolNames(), this.effectiveAllowedToolNames());
+  }
+
+  private runtimePermissionOptions(): {
+    permissionMode: ReturnType<typeof permissionPresetToMode>;
+    permissions?: ActoviqPermissionRule[];
+  } {
+    const permissions = this.runtimePermissionRules();
+    return permissions.length > 0
+      ? {
+          permissionMode: this.runtimePermissionMode(),
+          permissions,
+        }
+      : {
+          permissionMode: this.runtimePermissionMode(),
+        };
+  }
+
+  private resolveToolName(input: string | undefined): string | undefined {
+    const trimmed = input?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    const available = this.availableToolNames();
+    const exact = available.find(toolName => toolName.toLowerCase() === trimmed.toLowerCase());
+    if (exact) {
+      return exact;
+    }
+
+    const prefixMatches = available.filter(toolName =>
+      toolName.toLowerCase().startsWith(trimmed.toLowerCase()),
+    );
+    return prefixMatches.length === 1 ? prefixMatches[0] : undefined;
+  }
+
+  private setBuddyReaction(text: string | undefined): void {
+    const normalized = text?.trim();
+    if (!normalized) {
+      return;
+    }
+    this.buddyReactionText = normalized;
+    this.buddyReactionAt = Date.now();
+  }
+
+  private async refreshToolCatalog(): Promise<void> {
+    this.toolMetadata = (await this.sdk.listToolMetadata()).sort((left, right) => {
+      if (left.category === right.category) {
+        return left.name.localeCompare(right.name);
+      }
+      return left.category.localeCompare(right.category);
+    });
+    const normalizedAllowed = canonicalizeAllowedTools(
+      this.availableToolNames(),
+      this.config.autonomy.allowedTools,
+    );
+    if (
+      normalizedAllowed.length !== this.config.autonomy.allowedTools.length ||
+      normalizedAllowed.some((value, index) => value !== this.config.autonomy.allowedTools[index])
+    ) {
+      this.config.autonomy.allowedTools = normalizedAllowed;
+      await this.persistConfig();
+    }
+  }
+
+  private toolSummaryLines(): string[] {
+    const configured = new Set(this.configuredAllowedToolNames());
+    const effective = new Set(this.effectiveAllowedToolNames());
+    const nameWidth = Math.max(8, ...this.toolMetadata.map(tool => tool.name.length));
+    const categoryWidth = Math.max(8, ...this.toolMetadata.map(tool => tool.category.length));
+
+    return this.toolMetadata.length === 0
+      ? ['No tools are registered.']
+      : this.toolMetadata.map(tool => {
+          const status = effective.has(tool.name)
+            ? 'enabled'
+            : configured.has(tool.name)
+            ? 'blocked-by-preset'
+            : 'disabled';
+          return `${tool.name.padEnd(nameWidth)} ${status.padEnd(17)} ${tool.category.padEnd(categoryWidth)} ${tool.description}`;
+        });
+  }
+
   snapshot(): ControllerSnapshot {
     return {
       workspacePath: this.config.workspacePath,
       runtimeConfigPath: this.runtimeInfo.runtimeConfigPath,
       runtimeConfigSource: this.runtimeInfo.source,
       detectedModel: this.runtimeInfo.detectedModel,
-      permissionMode: this.config.autonomy.permissionMode,
+      permissionMode: this.runtimePermissionMode(),
+      permissionPreset: this.config.autonomy.permissionPreset,
+      availableTools: [...this.toolMetadata],
+      configuredAllowedTools: this.configuredAllowedToolNames(),
+      effectiveAllowedTools: this.effectiveAllowedToolNames(),
       autoRunEnabled: this.config.autonomy.autoRun,
       autoExtractMemoryEnabled: this.config.autonomy.autoExtractMemory,
       autoDreamEnabled: this.config.autonomy.autoDream,
@@ -366,6 +508,9 @@ export class AutonomousAssistantController extends EventEmitter {
       logs: [...this.state.logs],
       heartbeats: { ...this.state.heartbeats },
       buddy: this.buddy,
+      buddyReactionText: this.buddyReactionText,
+      buddyReactionAt: this.buddyReactionAt,
+      buddyIntroText: this.buddyIntroText,
       dream: this.dream,
       memory: this.memoryPanel,
       backgroundTasks: this.backgroundTasks,
@@ -392,7 +537,7 @@ export class AutonomousAssistantController extends EventEmitter {
           [
             'Commands:',
             '/help',
-            '/status | /tasks | /heartbeat | /memory | /dream | /buddy',
+            '/status | /tasks | /heartbeat | /memory | /dream | /buddy | /tools | /permission',
             '/resume [chat-id|last|list|queue] | /sessions | /close',
             'Open a panel, then type local commands like "tick", "every 20", or "pet".',
           ].join('\n'),
@@ -411,6 +556,12 @@ export class AutonomousAssistantController extends EventEmitter {
         break;
       case 'buddy':
         await this.handleBuddyCommand(command.args);
+        break;
+      case 'tools':
+        await this.handleToolsCommand(command.args);
+        break;
+      case 'permission':
+        await this.handlePermissionCommand(command.args);
         break;
       case 'dream':
         await this.handleDreamCommand(command.args);
@@ -449,6 +600,8 @@ export class AutonomousAssistantController extends EventEmitter {
             `archived chats: ${this.state.chats.length}`,
             `workspace: ${this.config.workspacePath}`,
             `model: ${this.runtimeInfo.detectedModel ?? 'unknown'}`,
+            `permission: ${permissionPresetLabel(this.config.autonomy.permissionPreset)} (${this.runtimePermissionMode()})`,
+            `tools: ${this.effectiveAllowedToolNames().length}/${this.availableToolNames().length} enabled`,
             `paused: ${this.state.paused}`,
             `busy: ${this.busy}`,
             `missions: ${this.state.missions.length}`,
@@ -529,7 +682,7 @@ export class AutonomousAssistantController extends EventEmitter {
 
       const stream = session.stream(nextMission.prompt, {
         signal: this.activeAbortController.signal,
-        permissionMode: this.config.autonomy.permissionMode,
+        ...this.runtimePermissionOptions(),
       });
 
       for await (const event of stream) {
@@ -676,6 +829,7 @@ export class AutonomousAssistantController extends EventEmitter {
 
   private async refreshRuntimePanels(): Promise<void> {
     this.buddy = await this.sdk.buddy.state();
+    this.buddyIntroText = (await this.sdk.buddy.getIntroText()) ?? undefined;
     this.dream = await this.sdk.dreamState();
     const manifest = await this.sdk.memory.formatMemoryManifest();
     this.memoryPanel = {
@@ -705,6 +859,7 @@ export class AutonomousAssistantController extends EventEmitter {
     }
 
     this.buddy = state;
+    this.buddyIntroText = (await this.sdk.buddy.getIntroText()) ?? undefined;
   }
 
   private async pollBackgroundTasks(): Promise<void> {
@@ -796,7 +951,26 @@ export class AutonomousAssistantController extends EventEmitter {
     this.emitUpdated();
   }
 
-  async handlePanelInput(panel: 'help' | 'status' | 'tasks' | 'memory' | 'dream' | 'buddy' | 'heartbeat', input: string): Promise<void> {
+  async updatePermissionSettings(preset: 'chat-only' | 'workspace-only' | 'full-access'): Promise<void> {
+    this.config.autonomy.permissionPreset = preset;
+    this.config.autonomy.permissionMode = this.runtimePermissionMode();
+    await this.persistConfig();
+    this.emitUpdated();
+  }
+
+  async updateAllowedTools(nextAllowedTools: string[]): Promise<void> {
+    this.config.autonomy.allowedTools = canonicalizeAllowedTools(
+      this.availableToolNames(),
+      nextAllowedTools,
+    );
+    await this.persistConfig();
+    this.emitUpdated();
+  }
+
+  async handlePanelInput(
+    panel: 'help' | 'status' | 'tasks' | 'memory' | 'dream' | 'buddy' | 'heartbeat' | 'tools' | 'permission',
+    input: string,
+  ): Promise<void> {
     const tokens = tokenizeCommand(input.trim());
     const action = (tokens[0] ?? '').toLowerCase();
     const args = tokens.slice(1);
@@ -907,12 +1081,29 @@ export class AutonomousAssistantController extends EventEmitter {
         }
         break;
       }
+      case 'permission': {
+        await this.handlePermissionCommand([action, ...args]);
+        break;
+      }
+      case 'tools': {
+        await this.handleToolsCommand([action, ...args]);
+        break;
+      }
       case 'buddy': {
-        if (action === 'pet' || action === 'mute' || action === 'unmute' || action === 'hatch') {
+        if (
+          action === 'pet' ||
+          action === 'mute' ||
+          action === 'unmute' ||
+          action === 'hatch' ||
+          action === 'rename' ||
+          action === 'persona' ||
+          action === 'intro' ||
+          action === 'show'
+        ) {
           await this.handleBuddyCommand([action, ...args]);
           break;
         }
-        this.log('warn', 'buddy', 'Buddy panel commands: pet | mute | unmute | hatch <name> [personality]');
+        this.log('warn', 'buddy', 'Buddy panel commands: show | pet | intro | mute | unmute | rename <name> | persona <text> | hatch <name> [personality]');
         break;
       }
       case 'dream': {
@@ -985,7 +1176,7 @@ export class AutonomousAssistantController extends EventEmitter {
         break;
       }
       case 'help':
-        this.log('info', 'system', 'Use /heartbeat, /tasks, /memory, /dream, /buddy, or /status to open a focused panel.');
+        this.log('info', 'system', 'Use /heartbeat, /tasks, /memory, /dream, /buddy, /tools, /permission, or /status to open a focused panel.');
         break;
     }
 
@@ -1047,9 +1238,10 @@ export class AutonomousAssistantController extends EventEmitter {
     this.heartbeatBusy = true;
     try {
       const session = await this.resolveHeartbeatSession();
-      const result = await session.send(`${this.config.heartbeat.prompt}\n\n${this.heartbeatGuideInstruction()}`, {
-        permissionMode: this.config.autonomy.permissionMode,
-      });
+      const result = await session.send(
+        `${this.config.heartbeat.prompt}\n\n${this.heartbeatGuideInstruction()}`,
+        this.runtimePermissionOptions(),
+      );
       const normalized = normalizeHeartbeatResponse(
         result.text,
         this.config.heartbeat.ackMaxChars,
@@ -1139,27 +1331,223 @@ export class AutonomousAssistantController extends EventEmitter {
     this.log('warn', 'heartbeat', 'Usage: /heartbeat on | off | tick | every <minutes>');
   }
 
+  private async handlePermissionCommand(args: string[]): Promise<void> {
+    const action = normalizePermissionPreset(args[0], this.config.autonomy.permissionPreset);
+    const raw = (args[0] ?? '').toLowerCase();
+
+    if (!args[0] || raw === 'show' || raw === 'state') {
+      this.log(
+        'info',
+        'system',
+        [
+          `permission preset: ${permissionPresetLabel(this.config.autonomy.permissionPreset)}`,
+          `runtime mode: ${this.runtimePermissionMode()}`,
+          `effective tools: ${this.effectiveAllowedToolNames().join(', ') || 'none'}`,
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (
+      raw !== 'chat-only' &&
+      raw !== 'workspace-only' &&
+      raw !== 'full-access' &&
+      raw !== 'chat' &&
+      raw !== 'workspace' &&
+      raw !== 'full'
+    ) {
+      this.log('warn', 'system', 'Usage: /permission chat-only | workspace-only | full-access');
+      return;
+    }
+
+    const preset =
+      raw === 'chat'
+        ? 'chat-only'
+        : raw === 'workspace'
+        ? 'workspace-only'
+        : raw === 'full'
+        ? 'full-access'
+        : action;
+
+    await this.updatePermissionSettings(preset);
+    this.log(
+      'success',
+      'system',
+      `Permission preset set to ${permissionPresetLabel(preset)}. Effective tools: ${
+        this.effectiveAllowedToolNames().join(', ') || 'none'
+      }.`,
+    );
+  }
+
+  private async handleToolsCommand(args: string[]): Promise<void> {
+    const action = (args[0] ?? '').toLowerCase();
+    const available = this.availableToolNames();
+    const configured = new Set(this.configuredAllowedToolNames());
+    const category = args[1]?.toLowerCase() === 'category' ? (args[2] ?? '').toLowerCase() : undefined;
+    const categoryTools =
+      category && this.toolMetadata.some(tool => tool.category === category)
+        ? this.toolMetadata
+            .filter(tool => tool.category === category)
+            .map(tool => tool.name)
+        : [];
+
+    if (!action || action === 'show' || action === 'list') {
+      this.log(
+        'info',
+        'system',
+        [
+          `permission preset: ${permissionPresetLabel(this.config.autonomy.permissionPreset)}`,
+          `configured tools: ${this.configuredAllowedToolNames().join(', ') || 'none'}`,
+          `effective tools: ${this.effectiveAllowedToolNames().join(', ') || 'none'}`,
+          ...this.toolSummaryLines(),
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if ((action === 'allow' || action === 'enable') && (args[1] ?? '').toLowerCase() === 'all') {
+      await this.updateAllowedTools(available);
+      this.log('success', 'system', `All tools enabled in the tool allowlist.`);
+      return;
+    }
+
+    if ((action === 'deny' || action === 'disable') && (args[1] ?? '').toLowerCase() === 'all') {
+      await this.updateAllowedTools([]);
+      this.log('warn', 'system', 'All tools disabled in the tool allowlist.');
+      return;
+    }
+
+    if (action === 'reset') {
+      await this.updateAllowedTools(defaultAllowedTools());
+      this.log('success', 'system', `Tool allowlist reset to defaults: ${this.configuredAllowedToolNames().join(', ') || 'none'}.`);
+      return;
+    }
+
+    if ((action === 'allow' || action === 'enable') && categoryTools.length > 0) {
+      await this.updateAllowedTools([...new Set([...configured, ...categoryTools])]);
+      this.log('success', 'system', `Enabled ${category} tools: ${categoryTools.join(', ')}.`);
+      return;
+    }
+
+    if ((action === 'deny' || action === 'disable') && categoryTools.length > 0) {
+      categoryTools.forEach(toolName => configured.delete(toolName));
+      await this.updateAllowedTools([...configured]);
+      this.log('warn', 'system', `Disabled ${category} tools: ${categoryTools.join(', ')}.`);
+      return;
+    }
+
+    const target = this.resolveToolName(args.slice(1).join(' '));
+    if (!target) {
+      this.log('warn', 'system', 'Usage: /tools show | allow all | deny all | reset | enable <tool> | disable <tool> | toggle <tool> | enable category <name> | disable category <name>');
+      return;
+    }
+
+    switch (action) {
+      case 'allow':
+      case 'enable': {
+        configured.add(target);
+        await this.updateAllowedTools([...configured]);
+        this.log('success', 'system', `${target} enabled in the tool allowlist.`);
+        return;
+      }
+      case 'deny':
+      case 'disable': {
+        configured.delete(target);
+        await this.updateAllowedTools([...configured]);
+        this.log('warn', 'system', `${target} disabled in the tool allowlist.`);
+        return;
+      }
+      case 'toggle': {
+        if (configured.has(target)) {
+          configured.delete(target);
+          await this.updateAllowedTools([...configured]);
+          this.log('warn', 'system', `${target} disabled in the tool allowlist.`);
+        } else {
+          configured.add(target);
+          await this.updateAllowedTools([...configured]);
+          this.log('success', 'system', `${target} enabled in the tool allowlist.`);
+        }
+        return;
+      }
+      default:
+        this.log('warn', 'system', 'Usage: /tools show | allow all | deny all | reset | enable <tool> | disable <tool> | toggle <tool> | enable category <name> | disable category <name>');
+        return;
+    }
+  }
+
   private async handleBuddyCommand(args: string[]): Promise<void> {
     const action = (args[0] ?? '').toLowerCase();
     switch (action) {
+      case 'show': {
+        this.buddy = await this.sdk.buddy.state();
+        this.buddyIntroText = (await this.sdk.buddy.getIntroText()) ?? undefined;
+        this.log(
+          'info',
+          'buddy',
+          this.buddy?.buddy
+            ? `${this.buddy.buddy.name} the ${this.buddy.buddy.species} is here.`
+            : 'No buddy has been hatched yet.',
+        );
+        break;
+      }
       case 'pet': {
         const reaction = await this.sdk.buddy.pet();
         this.buddy = await this.sdk.buddy.state();
+        this.setBuddyReaction(reaction?.reaction);
         this.log('success', 'buddy', reaction?.reaction ?? 'Buddy is resting quietly.');
+        break;
+      }
+      case 'intro': {
+        this.buddyIntroText = (await this.sdk.buddy.getIntroText()) ?? undefined;
+        this.log('info', 'buddy', this.buddyIntroText ?? 'Buddy intro is not available yet.');
         break;
       }
       case 'mute':
         this.buddy = await this.sdk.buddy.mute();
         this.config.buddy.muted = true;
         await this.persistConfig();
+        this.setBuddyReaction(`${this.config.buddy.name} is muted for now.`);
         this.log('info', 'buddy', 'Buddy muted.');
         break;
       case 'unmute':
         this.buddy = await this.sdk.buddy.unmute();
         this.config.buddy.muted = false;
         await this.persistConfig();
+        this.setBuddyReaction(`${this.config.buddy.name} is back.`);
         this.log('success', 'buddy', 'Buddy unmuted.');
         break;
+      case 'rename': {
+        const name = args.slice(1).join(' ').trim();
+        const current = this.buddy?.buddy;
+        if (!name || !current) {
+          this.log('warn', 'buddy', 'Usage: /buddy rename <name>');
+          return;
+        }
+        await this.sdk.buddy.hatch({ name, personality: current.personality });
+        this.config.buddy.name = name;
+        await this.persistConfig();
+        this.buddy = await this.sdk.buddy.state();
+        this.buddyIntroText = (await this.sdk.buddy.getIntroText()) ?? undefined;
+        this.setBuddyReaction(`${name} has a fresh name tag now.`);
+        this.log('success', 'buddy', `Buddy renamed to ${name}.`);
+        break;
+      }
+      case 'persona': {
+        const personality = args.slice(1).join(' ').trim();
+        const current = this.buddy?.buddy;
+        if (!personality || !current) {
+          this.log('warn', 'buddy', 'Usage: /buddy persona <text>');
+          return;
+        }
+        await this.sdk.buddy.hatch({ name: current.name, personality });
+        this.config.buddy.personality = personality;
+        await this.persistConfig();
+        this.buddy = await this.sdk.buddy.state();
+        this.buddyIntroText = (await this.sdk.buddy.getIntroText()) ?? undefined;
+        this.setBuddyReaction(`${current.name} feels newly ${trimPreview(personality, 36)}.`);
+        this.log('success', 'buddy', 'Buddy personality updated.');
+        break;
+      }
       case 'hatch': {
         const name = args[1];
         const personality = args.slice(2).join(' ').trim() || this.config.buddy.personality;
@@ -1172,11 +1560,13 @@ export class AutonomousAssistantController extends EventEmitter {
         this.config.buddy.personality = personality;
         await this.persistConfig();
         this.buddy = await this.sdk.buddy.state();
+        this.buddyIntroText = (await this.sdk.buddy.getIntroText()) ?? undefined;
+        this.setBuddyReaction(`${name} the ${this.buddy?.buddy?.species ?? 'buddy'} hatched beside the prompt.`);
         this.log('success', 'buddy', `Buddy hatched: ${name}`);
         break;
       }
       default:
-        this.log('warn', 'buddy', 'Usage: /buddy pet | mute | unmute | hatch <name> [personality]');
+        this.log('warn', 'buddy', 'Usage: /buddy show | pet | intro | mute | unmute | rename <name> | persona <text> | hatch <name> [personality]');
         break;
     }
   }

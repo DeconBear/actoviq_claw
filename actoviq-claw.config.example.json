@@ -2,6 +2,11 @@
   "workspacePath": ".",
   "runtimeConfigPath": "./actoviq-claw.runtime.settings.local.json",
   "stateDir": "./.actoviq-claw",
+  "tooling": {
+    "enableComputerUse": true,
+    "computerUsePrefix": "computer",
+    "mcpServers": []
+  },
   "heartbeat": {
     "enabled": true,
     "intervalMinutes": 20,

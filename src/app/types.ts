@@ -1,11 +1,14 @@
 import type {
   ActoviqBackgroundTaskRecord,
   ActoviqBuddyState,
+  ActoviqCleanToolMetadata,
   ActoviqCompactState,
   ActoviqDreamState,
+  AgentMcpServerDefinition,
   ActoviqPermissionMode,
   ActoviqRelevantMemory,
 } from 'actoviq-agent-sdk';
+import type { PermissionPreset } from './permissions.js';
 
 export type AssistantLogLevel = 'info' | 'success' | 'warn' | 'error';
 export type MissionStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -20,6 +23,11 @@ export interface AssistantAppConfig {
   workspacePath: string;
   runtimeConfigPath: string;
   stateDir: string;
+  tooling: {
+    enableComputerUse: boolean;
+    computerUsePrefix?: string;
+    mcpServers: AgentMcpServerDefinition[];
+  };
   heartbeat: {
     enabled: boolean;
     guideFilePath: string;
@@ -34,6 +42,8 @@ export interface AssistantAppConfig {
     autoExtractMemory: boolean;
     autoDream: boolean;
     permissionMode: ActoviqPermissionMode;
+    permissionPreset: PermissionPreset;
+    allowedTools: string[];
   };
   buddy: {
     autoHatch: boolean;
@@ -132,6 +142,10 @@ export interface ControllerSnapshot {
   runtimeConfigSource: RuntimeBootstrapInfo['source'];
   detectedModel?: string;
   permissionMode: ActoviqPermissionMode;
+  permissionPreset: PermissionPreset;
+  availableTools: ActoviqCleanToolMetadata[];
+  configuredAllowedTools: string[];
+  effectiveAllowedTools: string[];
   autoRunEnabled: boolean;
   autoExtractMemoryEnabled: boolean;
   autoDreamEnabled: boolean;
@@ -152,6 +166,9 @@ export interface ControllerSnapshot {
   logs: AssistantLogEntry[];
   heartbeats: HeartbeatRuntimeState;
   buddy?: ActoviqBuddyState;
+  buddyReactionText?: string;
+  buddyReactionAt?: number;
+  buddyIntroText?: string;
   dream?: ActoviqDreamState;
   memory: MemoryPanelState;
   backgroundTasks: ActoviqBackgroundTaskRecord[];
