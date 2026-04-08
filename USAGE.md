@@ -526,11 +526,13 @@ This repository includes a GitHub Actions workflow for npm publishing:
 
 To use it:
 
-1. choose one publish mode:
-   - add an `NPM_TOKEN` repository secret in GitHub
-   - or configure npm trusted publishing for this GitHub repository
-2. update the version in `package.json`
-3. create and push a matching Git tag such as `v0.1.0`
+1. configure npm trusted publishing for this package on npmjs.com
+2. use these values:
+   - GitHub user or org: `DeconBear`
+   - repository: `actoviq_claw`
+   - workflow filename: `npm-publish.yml`
+3. update the version in `package.json`
+4. create and push a matching Git tag such as `v0.1.0`
 
 The workflow will:
 

@@ -194,9 +194,13 @@ This repository now includes a GitHub Actions workflow at [.github/workflows/npm
 
 To use it:
 
-1. add an `NPM_TOKEN` secret in the GitHub repository settings
-2. bump the package version in `package.json`
-3. create and push a matching tag such as `v0.1.0`
+1. configure npm trusted publishing for this package on npmjs.com
+2. use:
+   - GitHub user or org: `DeconBear`
+   - repository: `actoviq_claw`
+   - workflow filename: `npm-publish.yml`
+3. bump the package version in `package.json`
+4. create and push a matching tag such as `v0.1.0`
 
 The workflow will then:
 
@@ -208,10 +212,7 @@ The workflow will then:
 
 This repository also includes a normal CI workflow at [.github/workflows/ci.yml](./.github/workflows/ci.yml) for push and pull request verification.
 
-Publishing supports two modes:
-
-- `NPM_TOKEN` secret with an npm automation token
-- npm trusted publishing via GitHub OIDC, if you configure the package on npm
+Publishing is now configured for npm trusted publishing via GitHub OIDC.
 
 ## Long-Term Direction
 
