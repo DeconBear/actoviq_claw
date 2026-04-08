@@ -1,29 +1,90 @@
 # Actoviq Claw
 
-`Actoviq Claw` is a fully autonomous terminal AI assistant built on top of `actoviq-agent-sdk`.
+`Actoviq Claw` is a full-screen autonomous TUI assistant built on top of `actoviq-agent-sdk`.
 
-It is designed for unattended task execution and keeps the UI focused on the chat flow:
+This repository is also a broader product experiment: a new attempt at building an AI brain that can eventually live in the cloud and connect to many kinds of hardware. The long-term goal is not only a terminal assistant on a computer, but a reusable AI core that could later power desktops, phones, robots, and other network-connected devices. The current repository is still an early-stage implementation focused on the TUI and local unattended workflows, and it will continue to evolve step by step.
 
-- fullscreen chat-style transcript
-- bottom prompt bar with slash-command and `@file` workflow
-- Claude Code-style footer suggestions for slash/file completion
-- built-in heartbeat, buddy, memory, dream, and background task support
-- per-chat history saved by chat id for later resume
+## Vision
 
-## Interface
+The idea behind `Actoviq Claw` is simple:
 
-The default TUI now follows a much simpler layout:
+- one persistent AI brain
+- multiple possible hardware shells
+- long-running memory, heartbeat, and dream loops
+- autonomous task execution instead of one-shot chat only
 
-- main transcript shows only user tasks and assistant answers
-- bottom prompt is the primary interaction point
-- every launch starts a fresh chat window
-- each chat is archived under its own chat id
-- typing `/` opens command suggestions
-- typing `@` opens workspace file and path suggestions
-- suggestions stay in the prompt footer instead of taking over the screen
-- runtime features live in footer pills and on-demand panels instead of a permanent dashboard
+Today, the project is still in its first practical stage:
 
-The available built-in panels are:
+- the main interface is a terminal UI
+- the current runtime is local-first
+- the system already supports unattended loops, tools, memory, dream, and buddy
+- more device surfaces and broader integration layers are future work
+
+## Current Scope
+
+Right now this repository focuses on a chat-first terminal experience:
+
+- fullscreen TUI
+- slash-command driven operations
+- per-chat history with resume
+- autonomous mission queue
+- heartbeat-based unattended checking
+- buddy companion layer
+- session memory and dream support
+- file tools, task delegation, and computer-use tools
+
+It is intentionally not positioned as a finished cross-device product yet. It is an actively developing prototype that is meant to grow into a larger AI brain architecture over time.
+
+## Key Features
+
+- autonomous mission queue for unattended execution
+- fresh chat window on every launch, with archived chat restore by id
+- `/heartbeat` panel for unattended checks, worktime, interval, guide file, and isolated-session mode
+- `/tools` panel for allowlist control across file, task, computer-use, and future MCP tools
+- `/permission` panel for `chat-only`, `workspace-only`, and `full-access`
+- built-in buddy, memory, dream, and background-task support
+- `@file` completion for workspace files and paths
+- runtime history directory selection and chat resume flows
+
+## Quick Start
+
+```bash
+npm install
+npm run dev
+```
+
+If credentials are missing, configure either:
+
+- `actoviq-claw.runtime.settings.local.json`
+- or environment variables such as `ACTOVIQ_BASE_URL`, `ACTOVIQ_AUTH_TOKEN`, and `ACTOVIQ_MODEL`
+
+Legacy runtime names are mapped automatically, so existing `ANTHROPIC_*` fields can still work.
+
+## Main Config Files
+
+- [actoviq-claw.runtime.settings.example.json](./actoviq-claw.runtime.settings.example.json)
+- [actoviq-claw.config.example.json](./actoviq-claw.config.example.json)
+- [HEARTBEAT.md](./HEARTBEAT.md)
+
+Common app-level settings include:
+
+- `workspacePath`
+- `historyDir`
+- heartbeat defaults
+- tool and permission defaults
+- computer-use settings
+- MCP server definitions
+
+## Interface Summary
+
+The TUI is chat-first.
+
+- main transcript for user tasks and assistant replies
+- bottom prompt for chat, slash commands, and `@file`
+- footer pills for quick runtime context
+- focused panels for operational features
+
+Built-in panels:
 
 - `/help`
 - `/status`
@@ -35,77 +96,97 @@ The available built-in panels are:
 - `/tools`
 - `/permission`
 
-## Quick Start
-
-```bash
-npm install
-npm run dev
-```
-
-If credentials are missing on first launch, configure either:
-
-- `actoviq-claw.runtime.settings.local.json`
-- or environment variables such as `ACTOVIQ_BASE_URL`, `ACTOVIQ_AUTH_TOKEN`, and `ACTOVIQ_MODEL`
-
-Legacy runtime field names are also mapped automatically.
-
-## TUI Controls
+## Controls
 
 - type plain text: submit a mission
-- type `/`: open command suggestions
-- open a panel such as `/heartbeat`: use `Up / Down` to pick a quick action, `Enter` to apply it, or `Tab` to insert and edit it
-- in `/heartbeat`, open `worktime` first, then choose `24h` or set `hours 00:00 24:00`
-- open `/tools`: pick a tool row to toggle it, or use global actions such as `allow all`, `deny all`, and `reset`
-- `/tools` also supports category actions such as `enable category computer` or `disable category mcp`
-- open `/permission`: choose `chat-only`, `workspace-only`, or `full-access` from the panel quick actions
-- open `/status`: run `history` to show the current history path or `history-dir <path>` to move chat-history storage
-- type `@`: autocomplete files and paths from the workspace
-- `Tab`: accept the selected suggestion or extend a shared file-path prefix
-- `Ctrl+N / Ctrl+P`: cycle the current suggestion list
-- `Up / Down`: browse input history while text is in the prompt
-- `Enter`: run the mission or command
-- `Shift+Enter` or `Meta+Enter`: insert a newline in the prompt
-- `Esc`: dismiss suggestions, close the current panel, press twice to clear input, or interrupt the active mission
-- mouse wheel or `PageUp / PageDown`: scroll the transcript
+- type `/`: open slash entry suggestions
+- type `@`: open workspace file suggestions
+- `Enter`: submit
+- `Shift+Enter`: newline
+- `Tab`: accept current suggestion or insert the selected panel action
+- `Up / Down`: select current suggestion or browse input history depending on context
+- `Esc`: dismiss suggestions, close panels, clear input, or interrupt the active mission depending on context
+- mouse wheel or `PageUp / PageDown`: scroll transcript or panel content
 - `Ctrl+Q` or `Ctrl+C`: exit
 
-## Core Features
+## Tools
 
-- autonomous mission queue
-- heartbeat-driven unattended checks with configurable schedule, active hours, isolated-session mode, and guide-file path
-- buddy companion card, intro text, reaction bubble, hatch, rename, persona, mute, unmute, and pet controls
-- persistent tool allowlist with `/tools`
-- built-in computer-use tools in `/tools`, registered by default but not enabled in the default allowlist
-- three permission presets with `/permission`: chat-only, workspace-only, and full-access
-- panel quick actions for tools, permissions, heartbeat, buddy, and other runtime controls
-- archived chats saved one file per chat id under `historyDir`
-
-## Tool Catalog
-
-By default, `/tools` now exposes more than the original file-tool set:
+The runtime currently exposes these default tool categories:
 
 - file tools: `Read`, `Write`, `Edit`, `Glob`, `Grep`
 - task delegation: `Task`
-- computer-use tools: `computer_open_url`, `computer_focus_window`, `computer_type_text`, `computer_keypress`, `computer_read_clipboard`, `computer_write_clipboard`, `computer_take_screenshot`, `computer_wait`, `computer_run_workflow`
+- computer-use tools:
+  - `computer_open_url`
+  - `computer_focus_window`
+  - `computer_type_text`
+  - `computer_keypress`
+  - `computer_read_clipboard`
+  - `computer_write_clipboard`
+  - `computer_take_screenshot`
+  - `computer_wait`
+  - `computer_run_workflow`
 
-Computer-use tools are registered by default so they appear in `/tools`, but they are not included in the default allowlist until you enable them.
+Computer-use tools are registered by default so they appear in `/tools`, but they are not enabled in the default allowlist until you explicitly allow them.
 
-If you want external MCP tools to appear in `/tools` too, add them under `tooling.mcpServers` in [actoviq-claw.config.example.json](./actoviq-claw.config.example.json).
-- automatic session memory extraction and memory search
-- dream state tracking and manual or automatic dream runs
-- background task tracking for delegated work
-- archived chat history with `/resume` restoration
+If you configure MCP servers, their tools can also appear in `/tools`.
 
-## Chat History
+## Skills
 
-- every launch opens a fresh chat window with a stable `chat_<...>` id
-- archived chats are saved individually in `historyDir`
-- use `/resume <chat-id>` directly, or open `/tasks`, press `Enter` on `resume`, and then choose a chat id
-- the `/tasks` resume picker shows current-workspace ids first; press `Tab` there to view ids from all workspaces
-- use `/status`, then run `history` or `history-dir <path>` to inspect or change the save path
+The current runtime also loads built-in SDK skills. At the time of writing, the bundled set includes:
 
-## Docs
+- `debug`
+- `simplify`
+- `batch`
+- `verify`
+- `remember`
+- `stuck`
+- `loop`
+- `update-config`
 
+These skills are available through the runtime even though the TUI is still centered on the panel workflow rather than a dedicated `/skills` panel.
+
+## Project Status
+
+This is an early-stage system.
+
+What is already real:
+
+- unattended task execution
+- heartbeat loop
+- memory extraction
+- dream execution
+- tool gating
+- chat history and resume
+- companion-style buddy layer
+
+What is still evolving:
+
+- more polished TUI behavior
+- broader device integration
+- richer skill exposure in the UI
+- deeper autonomy orchestration
+- more complete cloud-brain architecture across hardware surfaces
+
+## Documentation
+
+- English usage guide: [USAGE.md](./USAGE.md)
 - Chinese usage guide: [USAGE-zh.md](./USAGE-zh.md)
-- Heartbeat template: [HEARTBEAT.md](./HEARTBEAT.md)
-- Runtime settings example: [actoviq-claw.runtime.settings.example.json](./actoviq-claw.runtime.settings.example.json)
+- Heartbeat guide template: [HEARTBEAT.md](./HEARTBEAT.md)
+
+## Long-Term Direction
+
+`Actoviq Claw` should be read as the first visible shell of a larger ambition:
+
+- a reusable AI brain
+- cloud-connected when needed
+- stateful across sessions
+- able to inhabit different devices
+
+In the future, that could mean:
+
+- a desktop worker
+- a mobile companion
+- a robot control layer
+- an embedded agent on any network-connected hardware
+
+Today, this repository is still the early TUI prototype. It is intentionally practical first, ambitious second, and it will be refined gradually.

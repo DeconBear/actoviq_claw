@@ -1,21 +1,23 @@
-# Actoviq Claw 使用教程
+﻿# Actoviq Claw 使用教程
 
 ## 1. 项目定位
 
-`Actoviq Claw` 是一个运行在终端里的全自动 AI 助理，基于 `actoviq-agent-sdk` 构建。
+`Actoviq Claw` 是一个基于 `actoviq-agent-sdk` 构建的终端自治 AI 助理。
 
-它不是一次性的问答工具，而是一套可长期运行的自治工作台：
+它不只是一个聊天界面，也不只是一次性的问答工具。这个仓库更像是一个更大方向的早期原型：尝试做一个可持续运行、可长期记忆、可连接不同硬件外壳的 AI 大脑。当前阶段的主要表现形态还是 TUI，但未来目标并不局限于电脑终端，而是希望逐步扩展到手机、机器人以及各种可联网的硬件设备。
 
-- 你输入普通文本，它会把内容作为 mission 放进队列
-- 队列可以自动执行，也可以暂停和恢复
-- 空闲时会按 heartbeat 周期自动巡检
-- 任务结束后会提取 memory
-- 条件满足时会运行 dream
-- buddy 会作为常驻 companion 融入 TUI
+当前这个仓库聚焦的是：
+
+- 全屏 TUI
+- 无人值守任务执行
+- heartbeat 巡检
+- memory 与 dream 循环
+- tools 与 permission 控制
+- chat 历史归档与恢复
 
 ## 2. 安装与启动
 
-在当前目录执行：
+在项目目录执行：
 
 ```bash
 npm install
@@ -30,71 +32,70 @@ npm run dev -- --workspace E:/your/workspace
 
 ## 3. 运行时配置
 
-程序优先读取：
+运行时默认读取：
 
 - `actoviq-claw.runtime.settings.local.json`
 
-可以参考：
+可参考模板：
 
 - [actoviq-claw.runtime.settings.example.json](./actoviq-claw.runtime.settings.example.json)
 
-至少需要这些字段：
+至少需要配置：
 
 - `ACTOVIQ_BASE_URL`
 - `ACTOVIQ_AUTH_TOKEN`
 - `ACTOVIQ_MODEL`
 
-旧字段名也会自动兼容映射。
+旧字段名也会自动兼容映射，包括已有的 `ANTHROPIC_*` 字段。
+
+## 4. 应用配置
 
 应用自身配置文件是：
 
 - `actoviq-claw.config.json`
 
-可以参考：
+可参考：
 
 - [actoviq-claw.config.example.json](./actoviq-claw.config.example.json)
 
-这里可以配置：
+这里常见的配置项包括：
 
+- `workspacePath`
 - `stateDir`
 - `historyDir`
 - heartbeat 默认参数
-- tools / permission 默认策略
-- computer-use 和 MCP servers
+- 默认权限预设
+- 默认工具 allowlist
+- computer-use 配置
+- MCP server 配置
 
-## 4. 界面结构
+## 5. 界面结构
 
-当前 TUI 采用聊天优先的全屏布局，主要分成三部分：
+当前 TUI 是聊天优先的布局。
+
+你主要会看到：
 
 - 主聊天记录区
-- 底部输入区
+- 底部输入框
 - 底部状态 pills
+- 通过 slash 打开的功能面板
 
-默认不会把 heartbeat、memory、dream、tool call 这些过程日志持续刷进主聊天区，主界面只保留用户输入和助手回答。
+主聊天区刻意保持克制，不会像调试控制台一样把所有内部事件都刷出来。它更偏向展示用户任务与助手回答，而把运维和运行态信息收进面板与底部状态区。
 
-## 5. 基本交互
+## 6. 基础输入规则
 
 - 输入普通文本：提交一个 mission
-- 输入 `/`：打开命令入口
-- 输入 `@`：补全工作区文件和路径
+- 输入 `/`：打开 slash 入口
+- 输入 `@`：打开工作区文件和路径补全
 - `Enter`：提交任务或执行当前命令
-- `Shift+Enter`：在输入框内换行
-- `Tab`：接受当前建议，或继续补全公共路径前缀
-- `Up / Down`
-  - 当建议列表打开时：移动当前选项
-  - 当输入框里已经有文本时：切换输入历史
-  - 当输入框为空且没有建议时：滚动聊天记录
-- `Esc`
-  - 先关闭建议列表
-  - 再关闭当前面板
-  - 再次按下可清空输入
-  - 当前 mission 正在运行时可中断任务
-- 鼠标滚轮 / `PageUp` / `PageDown`：滚动聊天记录或当前面板正文
+- `Shift+Enter`：在输入框中换行
+- `Tab`：接受当前建议，或把当前面板动作填入输入框
 - `Ctrl+N / Ctrl+P`：切换当前建议项
-- `Ctrl+Q` / `Ctrl+C`：退出
-- `?`：打开帮助面板
+- `Esc`：关闭建议、关闭面板、清空输入、或中断当前任务，具体取决于上下文
+- 鼠标滚轮 / `PageUp` / `PageDown`：滚动聊天记录或面板正文
+- `Ctrl+Q` 或 `Ctrl+C`：退出
 
-## 6. Slash 入口
+## 7. Slash 入口
 
 当前主要入口有：
 
@@ -108,78 +109,44 @@ npm run dev -- --workspace E:/your/workspace
 - `/tools`
 - `/permission`
 
-这些命令主要是“进入某个面板”，不是把所有子命令都堆在 `/` 列表里。
+这里的设计目标是“先进入面板，再执行具体动作”，而不是把所有子命令一次性堆在 `/` 列表里。
 
-## 7. 面板内如何操作
+## 8. 面板内如何操作
 
-进入任意面板后，可以这样用：
+进入任意面板后：
 
-- `Up / Down`：选择 quick actions
-- `Enter`：直接执行当前选中项
-- `Tab`：把当前选中项填进输入框，再继续编辑
+- `Up / Down`：在 quick actions 中移动
+- `Enter`：直接执行当前动作
+- `Tab`：把当前动作填进输入框，再手动修改后执行
 - 鼠标滚轮：滚动面板正文，不操作 quick actions
 
 例如：
 
-- 在 `/heartbeat` 里选中 `start 08:00` 后按 `Tab`，再改成 `start 09:30`
-- 在 `/tools` 里选中某个 tool 后按 `Enter`，直接切换允许状态
+1. 输入 `/heartbeat`
+2. 选中 `worktime`
+3. 按 `Enter`
+4. 再选择 `24h` 或 `hours 09:00 18:00`
 
-## 8. 聊天历史与恢复
+## 9. Status 面板
 
-这是当前版本新增的一条重要能力。
-
-- 每次启动都会新开一个 chat 窗口
-- 每个 chat 都有稳定的 chat id，例如 `chat_abcd1234_xyz987`
-- 每个已归档 chat 都会按 id 单独保存成一个 JSON 文件
-- 默认保存目录是 `historyDir`
-
-默认示例路径：
+打开方式：
 
 ```text
-./.actoviq-claw/history
+/status
 ```
 
-恢复方式有两种：
+它主要用于查看：
 
-- 在输入框里直接执行：
-
-```text
-/resume <chat-id>
-```
-
-- 或进入 `/tasks`，直接选择对应的 `resume <chat-id>`
-  - 现在更推荐：先进入 `/tasks`
-  - 选中 `resume` 后按 `Enter`
-  - 默认先显示当前工作区的 chat ids
-  - 在 resume picker 里按 `Tab` 可以切到“所有工作区 ids”
-  - 每个 id 后面都会显示最近修改时间和工作区路径
-
-查看和修改历史保存路径：
-
-1. 输入 `/status`
-2. 在状态面板里执行：
-
-```text
-history
-history-dir ./my-history
-```
-
-## 9. 常见面板
-
-### `/status`
-
-查看整体运行状态，包括：
-
-- 当前 chat 标题和 chat id
-- 已归档聊天数量
-- 当前 historyDir
+- 当前 chat id 和标题
+- 已归档 chat 数量
 - 当前工作区
 - 当前模型
-- 当前权限模式
-- 当前生效工具数量
+- 当前 permission preset
+- 当前有效 tools 数量
 - 队列状态
+- 当前 history 目录
 
-常用命令：
+常见命令：
 
 - `pause`
 - `resume`
@@ -188,67 +155,164 @@ history-dir ./my-history
 - `history`
 - `history-dir <path>`
 
-### `/tasks`
+## 10. Tasks 面板
 
-查看：
+打开方式：
 
-- 最近 missions
-- 后台任务
-- 已归档 chats
+```text
+/tasks
+```
 
-常用命令：
+主要用途：
+
+- 查看 mission
+- 取消任务
+- 恢复历史 chat
+
+常见命令：
 
 - `resume`
 - `resume <chat-id>`
 - `resume queue`
 - `cancel <mission-id>`
 
-### `/heartbeat`
+### Resume 恢复流程
 
-用于配置无人值守巡检。
+当前推荐恢复方式是两步走：
 
-可操作项包括：
+1. 打开 `/tasks`
+2. 选中 `resume`
+3. 按 `Enter`
+4. 再从列表里选择 chat id
+
+当前行为：
+
+- 默认只展示当前工作区的 chat ids
+- 在该 picker 中按 `Tab` 可以切换为“所有工作区 ids”
+- 每个 id 会显示最近更新时间
+- 当前选中的项会额外展示完整信息，包括工作区路径、创建时间和最近修改时间
+
+## 11. Heartbeat 面板
+
+打开方式：
+
+```text
+/heartbeat
+```
+
+heartbeat 是系统的无人值守巡检循环。它会周期性地检查当前状态、读取 guide 文件，并决定是否需要继续处理。
+
+heartbeat 顶层常见动作：
 
 - `on`
 - `off`
+- `toggle`
 - `tick`
-- `every 30`
-- `start 09:00`
-- `end 22:30`
-- `hours 09:00 22:30`
-- `timezone Asia/Shanghai`
-- `file ./HEARTBEAT.md`
-- `isolated on`
+- `every <minutes>`
+- `worktime`
+- `file <path>`
+- `isolated <on|off>`
 
-### `/tools`
+### Worktime 配置流程
 
-用于查看和控制模型可使用的工具。
+heartbeat 的工作时间是二级配置入口：
 
-你会看到：
+1. 打开 `/heartbeat`
+2. 选中 `worktime`
+3. 按 `Enter`
+4. 再选择：
+   - `24h`
+   - `hours <start> <end>`
+   - `start <HH:MM>`
+   - `end <HH:MM>`
+   - `timezone <name|clear>`
 
-- 当前已注册 tool 数量
-- 当前已配置 / 实际生效的 tool 数量
-- quick actions
-- 每个 tool 的独立开关
+示例：
 
-常见操作：
+```text
+/heartbeat
+tick
+```
+
+```text
+/heartbeat
+every 30
+```
+
+```text
+/heartbeat
+worktime
+24h
+```
+
+```text
+/heartbeat
+worktime
+hours 09:00 22:30
+```
+
+```text
+/heartbeat
+file ./HEARTBEAT.md
+```
+
+## 12. Heartbeat Guide 文件
+
+guide 文件决定 heartbeat 巡检时应该重点看什么。
+
+默认模板：
+
+- [HEARTBEAT.md](./HEARTBEAT.md)
+
+你也可以在面板里改成别的文件：
+
+```text
+file ./ops/HEARTBEAT.md
+```
+
+heartbeat 执行时会尝试读取该文件，并按其中的规则执行。
+
+## 13. Tools 面板
+
+打开方式：
+
+```text
+/tools
+```
+
+这个面板用于控制模型当前允许使用哪些工具。
+
+系统运行时实际注册的工具，可能会比当前 allowlist 中启用的工具更多。`/tools` 的作用就是查看目录并控制 allowlist。
+
+常见动作：
 
 - `show`
 - `allow all`
 - `deny all`
 - `reset`
-- `enable category computer`
-- `disable <tool>`
 - `enable <tool>`
+- `disable <tool>`
+- `toggle <tool>`
+- `enable category computer`
+- `disable category computer`
+- `enable category file`
 
-当前常见 tools 包括：
+### 当前默认工具分类
+
+文件工具：
 
 - `Read`
 - `Write`
 - `Edit`
 - `Glob`
 - `Grep`
+
+委派工具：
+
 - `Task`
+
+computer-use 工具：
+
 - `computer_open_url`
 - `computer_focus_window`
 - `computer_type_text`
@@ -259,84 +323,194 @@ history-dir ./my-history
 - `computer_wait`
 - `computer_run_workflow`
 
-如果配置了 MCP servers，它们暴露出来的工具也会自动出现在 `/tools`。
+如果你配置了 MCP servers，那么它们暴露出来的工具也会出现在 `/tools` 中。
 
-### `/permission`
+## 14. Permission 面板
 
-用于设置权限预设。
+打开方式：
 
-可选三种模式：
+```text
+/permission
+```
+
+这个面板用来设定更大的权限边界。
+
+当前内置三种预设：
 
 - `chat-only`
 - `workspace-only`
 - `full-access`
 
-关系是：
+`/permission` 与 `/tools` 的关系是：
 
-- `/permission` 决定大范围权限边界
+- `/permission` 决定大边界
 - `/tools` 决定具体 allowlist
 - 最终生效的是两者的交集
 
-### `/buddy`
+## 15. Buddy 面板
 
-用于控制 companion。
+打开方式：
 
-常用命令：
+```text
+/buddy
+```
+
+buddy 是 companion 层，不是主任务引擎。它负责系统里的陪伴感、人格设定、反应层和长期 companion 身份。
+
+常见动作：
 
 - `show`
 - `pet`
 - `intro`
 - `mute`
 - `unmute`
-- `rename Mochi`
-- `persona calm and observant`
-- `hatch Mochi quietly supportive and curious`
+- `rename <name>`
+- `persona <text>`
+- `hatch <name> [personality]`
 
-### `/memory`
+示例：
 
-查看：
+```text
+rename Mochi
+persona calm and observant
+pet
+```
 
-- auto memory 状态
+## 16. Memory 面板
+
+打开方式：
+
+```text
+/memory
+```
+
+主要用于查看：
+
+- 当前 memory 状态
 - relevant memories
 - session memory 摘要
 - manifest 摘要
 
-### `/dream`
+常见动作：
 
-查看：
+- `state`
+- `refresh`
+- `find <query>`
 
-- 是否可运行
-- 阻塞原因
-- 距离上次 consolidation 的时间
-- 等待整理的 session 数量
+## 17. Dream 面板
 
-## 10. 一个推荐上手流程
+打开方式：
 
-1. 启动 `npm run dev`
-2. 先输入 `/status` 看当前 workspace、model、historyDir
-3. 输入 `/tools` 和 `/permission` 确认工具和权限边界
-4. 输入 `/heartbeat` 配置巡检周期和 guide 文件
+```text
+/dream
+```
+
+dream 是系统的整理与归纳循环。它会把累积的上下文进一步整理为更稳定的结构。
+
+你可以在这里查看：
+
+- 当前 dream 是否可运行
+- 如果被阻塞，阻塞原因是什么
+- 当前是否开启了自动 dream
+- 最近是否具备 consolidation 条件
+
+常见动作：
+
+- `state`
+- `run`
+
+系统也可以在条件合适时自动执行 dream。
+
+## 18. Skills
+
+当前 runtime 会加载 SDK 内置 skills，虽然 TUI 里还没有独立的 `/skills` 面板。
+
+目前默认 bundled skills 包括：
+
+- `debug`
+- `simplify`
+- `batch`
+- `verify`
+- `remember`
+- `stuck`
+- `loop`
+- `update-config`
+
+这些能力当前已经在 runtime 层可用。
+
+## 19. 聊天历史
+
+每次启动都会新开一个 chat 窗口。
+
+每个 chat：
+
+- 都会生成稳定的 `chat_<...>` id
+- 都会独立归档
+- 后续可以按 id 恢复
+
+默认历史目录：
+
+```text
+./.actoviq-claw/history
+```
+
+查看或修改 history 目录的方法：
+
+1. 打开 `/status`
+2. 执行：
+
+```text
+history
+history-dir ./my-history
+```
+
+## 20. 推荐的首次使用流程
+
+1. 运行 `npm run dev`
+2. 打开 `/status`，确认 workspace、model 和 history 路径
+3. 打开 `/tools` 和 `/permission`，确认能力边界
+4. 打开 `/heartbeat`，设置间隔、工作时间和 guide 文件
 5. 直接提交自然语言任务
-6. 需要恢复旧会话时，用 `/resume <chat-id>`，或者进入 `/tasks` 后用 `resume` picker
+6. 需要恢复旧会话时，使用 `/tasks -> resume`
 
-## 11. 常见问题
+## 21. 常见问题
 
-### 为什么每次启动都是一个新 chat？
+### 为什么每次启动都会新建一个 chat？
 
-这是当前设计的一部分。新启动默认新开窗口，旧 chat 通过 chat id 恢复，这样更接近 Claude Code 的会话方式。
+这是当前设计的一部分。新启动默认新开窗口，旧聊天通过 chat id 恢复。
 
-### 如何知道历史文件保存到哪里？
+### 为什么 `/tools` 里能看到一些工具，但默认不一定能直接用？
 
-用 `/status` 面板里的：
+因为工具“注册”和“允许使用”是两层逻辑。它可能已经出现在目录里，但仍然被 allowlist 或 permission preset 限制。
 
-- `history`
+### 为什么 heartbeat 有时看起来没有做事？
 
-### 如何修改历史保存位置？
+因为 heartbeat 可能检查后判断当前没有需要处理的事情，然后正常返回 `HEARTBEAT_OK`。
 
-用 `/status` 面板里的：
+### 为什么 dream 有时不能立即运行？
 
-- `history-dir <path>`
+dream 是带状态的，它可能因为时间门控、锁或 session 条件而暂时不可执行。
 
-### 为什么 `/tools` 里能看到 computer tools，但默认不一定能用？
+## 22. 当前限制
 
-因为它们默认是“已注册但未必在 allowlist 中”。这样你能看见能力范围，但不会一上来就放开桌面操作权限。
+这个项目仍然处于早期阶段。
+
+当前限制包括：
+
+- 主界面目前仍然只有 TUI
+- 一些 runtime 能力还没有全部做成一等 UI 面板
+- 跨设备与云端 AI 大脑能力还处于未来目标阶段
+- 交互界面仍在持续迭代
+
+## 23. 长期方向
+
+`Actoviq Claw` 不应该只被理解成一个终端程序。
+
+它更长期的目标，是成为一个可以连接不同硬件外壳的 AI 大脑：
+
+- 可以在电脑里
+- 可以在手机里
+- 可以在机器人里
+- 也可以进入其他任何可联网的硬件设备
+
+当前这个仓库就是这个方向的第一个可运行阶段。它已经展示了方向，但仍然是早期版本，后续会持续完善、扩展和重构。
